@@ -1,0 +1,116 @@
+import type { Mock } from 'vitest';
+
+import { fetchAPI } from '@/api';
+
+import { drawArena, voteArena } from '../useArena';
+
+vi.mock('@/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api')>()),
+  fetchAPI: vi.fn(),
+}));
+
+const fetchAPIMock = vi.mocked(fetchAPI) as unknown as Mock;
+
+describe('drawArena', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('posts the web search flag and returns the draw', async () => {
+    fetchAPIMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ arena: true, comparison_id: 'cmp-1' }),
+    });
+
+    const result = await drawArena('conv-1', true);
+
+    expect(result).toEqual({ arena: true, comparison_id: 'cmp-1' });
+    expect(fetchAPIMock).toHaveBeenCalledWith('chats/conv-1/arena/draw/', {
+      method: 'POST',
+      body: JSON.stringify({ force_web_search: true }),
+    });
+  });
+
+  it('returns arena false when the backend says so', async () => {
+    fetchAPIMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ arena: false }),
+    });
+
+    expect(await drawArena('conv-1', false)).toEqual({ arena: false });
+  });
+
+  it('returns arena false when the request fails', async () => {
+    fetchAPIMock.mockRejectedValue(new Error('network down'));
+
+    expect(await drawArena('conv-1', false)).toEqual({ arena: false });
+  });
+
+  it('returns arena false on a non-2xx response', async () => {
+    fetchAPIMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      headers: { get: () => null },
+      json: () => Promise.resolve({ detail: 'boom' }),
+    });
+
+    expect(await drawArena('conv-1', false)).toEqual({ arena: false });
+  });
+
+  it('returns arena false on a malformed payload', async () => {
+    fetchAPIMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ arena: true }),
+    });
+
+    expect(await drawArena('conv-1', false)).toEqual({ arena: false });
+  });
+});
+
+describe('voteArena', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('posts the side and returns the conversation', async () => {
+    const conversation = { id: 'conv-1', messages: [] };
+    fetchAPIMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(conversation),
+    });
+
+    const result = await voteArena('conv-1', 'cmp-1', 'right');
+
+    expect(result).toEqual(conversation);
+    expect(fetchAPIMock).toHaveBeenCalledWith(
+      'chats/conv-1/arena/cmp-1/vote/',
+      { method: 'POST', body: JSON.stringify({ side: 'right' }) },
+    );
+  });
+
+  it('posts a null side to abandon', async () => {
+    fetchAPIMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ id: 'conv-1', messages: [] }),
+    });
+
+    await voteArena('conv-1', 'cmp-1', null);
+
+    expect(fetchAPIMock.mock.calls[0][1]).toMatchObject({
+      body: JSON.stringify({ side: null }),
+    });
+  });
+
+  it('throws on a non-2xx response', async () => {
+    fetchAPIMock.mockResolvedValue({
+      ok: false,
+      status: 409,
+      headers: { get: () => null },
+      json: () => Promise.resolve({ detail: 'closed' }),
+    });
+
+    await expect(voteArena('conv-1', 'cmp-1', 'left')).rejects.toThrow(
+      'Failed to record the arena vote',
+    );
+  });
+});

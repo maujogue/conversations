@@ -321,4 +321,59 @@ describe('Chat message ownership', () => {
       ]),
     );
   });
+
+  it('puts an unvoted arena choice back on screen instead of resolving it', async () => {
+    getConversationMock.mockResolvedValue({
+      messages: [
+        ...HISTORY,
+        {
+          id: 'server-u2',
+          role: 'user' as const,
+          parts: [{ type: 'text' as const, text: 'The compared question' }],
+        },
+      ],
+      pending_arena_comparison: {
+        id: 'cmp-1',
+        sides_finished: { left: true, right: true },
+        restorable: true,
+        answers: {
+          left: {
+            id: 'a1',
+            role: 'assistant' as const,
+            parts: [{ type: 'text' as const, text: 'Stored left answer' }],
+          },
+          right: {
+            id: 'a2',
+            role: 'assistant' as const,
+            parts: [{ type: 'text' as const, text: 'Stored right answer' }],
+          },
+        },
+      },
+    });
+
+    renderChat();
+
+    expect(await screen.findByText('Stored left answer')).toBeInTheDocument();
+    expect(screen.getByText('Stored right answer')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'I prefer answer A' }),
+    ).toBeEnabled();
+    // Nothing was voted or abandoned behind the user's back.
+    expect(
+      fetchAPIMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/vote/'),
+      ),
+    ).toHaveLength(0);
+
+    // And the conversation cannot move on until a side is picked.
+    await act(async () => {
+      await ask('Another question');
+    });
+    expect(chatPostCount(fetchAPIMock)).toBe(0);
+    expect(
+      screen.getByText(
+        'Pick the answer you prefer above to continue this conversation.',
+      ),
+    ).toBeInTheDocument();
+  });
 });

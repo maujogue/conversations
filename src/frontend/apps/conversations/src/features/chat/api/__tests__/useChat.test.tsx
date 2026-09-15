@@ -8,6 +8,7 @@ import { FileUIPart, UIMessage } from 'ai';
 import type { Mock } from 'vitest';
 
 import { fetchAPI } from '@/api';
+import { useChatPreferencesStore } from '@/features/chat/stores/useChatPreferencesStore';
 
 import {
   isImagesSkippedEvent,
@@ -260,6 +261,55 @@ const FULL_TURN = [
   ',"completionTokens":3,"co2Impact":0.5},"co2_impact":0.5}}\n\n',
   'data: [DONE]\n\n',
 ].join('');
+
+describe('useChat extraSearchParams', () => {
+  const fetchAPIMock = vi.mocked(fetchAPI) as unknown as Mock;
+
+  const wrapper = ({ children }: { children: React.ReactNode }) => (
+    <QueryClientProvider
+      client={
+        new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      }
+    >
+      {children}
+    </QueryClientProvider>
+  );
+
+  it('appends the extra params and drops the model preference', async () => {
+    useChatPreferencesStore.setState({ selectedModelHrid: 'pinned-model' });
+    const chatCalls: string[] = [];
+    fetchAPIMock.mockImplementation((url: string) => {
+      if (url.startsWith('chat-cooldown')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ cooldown_seconds: 0 }),
+        });
+      }
+      chatCalls.push(url);
+      return Promise.resolve({ ok: true, body: streamOf(FULL_TURN) });
+    });
+
+    const { result } = renderHook(
+      () =>
+        useChat({
+          id: 'conv-1',
+          api: CHAT_API,
+          extraSearchParams: { arena_comparison: 'cmp-1', arena_side: 'left' },
+        }),
+      { wrapper },
+    );
+
+    await act(async () => {
+      await result.current.sendMessage({ text: 'hello' });
+    });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    expect(chatCalls).toEqual([
+      `${CHAT_API}?arena_comparison=cmp-1&arena_side=left`,
+    ]);
+    useChatPreferencesStore.setState({ selectedModelHrid: null });
+  });
+});
 
 describe('useChat against a backend stream', () => {
   const fetchAPIMock = vi.mocked(fetchAPI) as unknown as Mock;
