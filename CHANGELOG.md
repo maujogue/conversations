@@ -8,6 +8,13 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- ✨(back) add blind arena comparisons of the production model vs challengers
+- ✨(front) show two answers on arena turns and record the vote
+- ✨(front) keep an arena choice on screen until the user picks a side
+- ✨(arena) add "both good" / "both bad" votes with LM Arena style buttons
+
 ### Fixed
 
 - 🐛(ci) fix the CHANGELOG check failing when a pull request is opened
