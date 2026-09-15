@@ -45,6 +45,8 @@ class FeatureFlags(BaseModel):
     web_search: FeatureToggle = FeatureToggle.DISABLED
     document_upload: FeatureToggle = FeatureToggle.DISABLED
     presentation_generation: FeatureToggle = FeatureToggle.DISABLED
+    # Blind A/B comparison of the production model against challengers (see docs/arena-mvp-spec.md)
+    arena: FeatureToggle = FeatureToggle.DISABLED
 
     def __getattr__(self, name: str):
         """Dynamically get specific RAG document search tool feature flags from settings."""

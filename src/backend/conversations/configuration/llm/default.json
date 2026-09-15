@@ -18,7 +18,8 @@
         "JlXRUC/HwTscPIXf/iklq/tjb/gHAdxkCUjAg2QAAAABJRU5ErkJggg=="
       ],
       "system_prompt": "settings.AI_AGENT_INSTRUCTIONS",
-      "tools": "settings.AI_AGENT_TOOLS"
+      "tools": "settings.AI_AGENT_TOOLS",
+      "web_search": "chat.tools.web_search_brave.web_search_brave"
     },
     {
       "hrid": "default-summarization-model",
@@ -31,6 +32,90 @@
       "icon": null,
       "system_prompt": "settings.SUMMARIZATION_SYSTEM_PROMPT",
       "tools": []
+    },
+    {
+      "hrid": "gemma-4-31b",
+      "model_name": "gemma-4-31b-it",
+      "human_readable_name": "Gemma 4 31B",
+      "provider_name": "default-provider",
+      "profile": null,
+      "settings": {},
+      "is_active": true,
+      "supports_image": true,
+      "icon": null,
+      "system_prompt": "settings.AI_AGENT_INSTRUCTIONS",
+      "tools": "settings.AI_AGENT_TOOLS",
+      "web_search": "chat.tools.web_search_brave.web_search_brave"
+    },
+    {
+      "hrid": "mistral-small-3-2",
+      "model_name": "mistral-small-3-2-24b-instruct-2506",
+      "human_readable_name": "Mistral Small 3.2 24B",
+      "provider_name": "default-provider",
+      "profile": null,
+      "settings": {},
+      "is_active": true,
+      "supports_image": true,
+      "icon": null,
+      "system_prompt": "settings.AI_AGENT_INSTRUCTIONS",
+      "tools": "settings.AI_AGENT_TOOLS",
+      "web_search": "chat.tools.web_search_brave.web_search_brave"
+    },
+    {
+      "hrid": "mistral-medium-3-5",
+      "model_name": "mistral-medium-3-5",
+      "human_readable_name": "Mistral Medium 3.5",
+      "provider_name": "default-provider",
+      "profile": null,
+      "settings": {},
+      "is_active": true,
+      "supports_image": true,
+      "icon": null,
+      "system_prompt": "settings.AI_AGENT_INSTRUCTIONS",
+      "tools": "settings.AI_AGENT_TOOLS",
+      "web_search": "chat.tools.web_search_brave.web_search_brave"
+    },
+    {
+      "hrid": "ministral-3-8b",
+      "model_name": "ministral-3-8b-instruct-2512",
+      "human_readable_name": "Ministral 3 8B",
+      "provider_name": "default-provider",
+      "profile": null,
+      "settings": {},
+      "is_active": true,
+      "supports_image": false,
+      "icon": null,
+      "system_prompt": "settings.AI_AGENT_INSTRUCTIONS",
+      "tools": "settings.AI_AGENT_TOOLS",
+      "web_search": "chat.tools.web_search_brave.web_search_brave"
+    },
+    {
+      "hrid": "deepseek-v4-flash",
+      "model_name": "deepseek-v4-flash-0731",
+      "human_readable_name": "DeepSeek V4 Flash",
+      "provider_name": "default-provider",
+      "profile": null,
+      "settings": {},
+      "is_active": true,
+      "supports_image": false,
+      "icon": null,
+      "system_prompt": "settings.AI_AGENT_INSTRUCTIONS",
+      "tools": "settings.AI_AGENT_TOOLS",
+      "web_search": "chat.tools.web_search_brave.web_search_brave"
+    },
+    {
+      "hrid": "qwen3-coder-30b",
+      "model_name": "qwen3-coder-30b-A3b-instruct",
+      "human_readable_name": "Qwen3 Coder 30B",
+      "provider_name": "default-provider",
+      "profile": null,
+      "settings": {},
+      "is_active": true,
+      "supports_image": false,
+      "icon": null,
+      "system_prompt": "settings.AI_AGENT_INSTRUCTIONS",
+      "tools": "settings.AI_AGENT_TOOLS",
+      "web_search": "chat.tools.web_search_brave.web_search_brave"
     }
   ],
   "providers": [
@@ -39,7 +124,7 @@
       "base_url": "settings.AI_BASE_URL",
       "api_key": "settings.AI_API_KEY",
       "kind": "openai",
-      "co2_handling": null
+      "co2_handling": "albert"
     }
   ]
 }

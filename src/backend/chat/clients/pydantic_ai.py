@@ -129,6 +129,7 @@ from pydantic_ai.models import Model, infer_model_profile
 from core.analytics import acapture_event
 from core.feature_flags.helpers import is_feature_enabled
 
+from chat import arena as arena_service
 from chat import models
 from chat.agents.conversation import ConversationAgent, TitleGenerationAgent
 from chat.agents.history_processors import (
@@ -292,13 +293,15 @@ def _extract_co2_from_usage(usage: RunUsage) -> float:
 class AIAgentService:  # pylint: disable=too-many-instance-attributes
     """Service class for AI-related operations (Pydantic-AI edition)."""
 
-    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def __init__(  # noqa: PLR0913  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         conversation: models.ChatConversation,
         user,
         session=None,
         model_hrid=None,
         language=None,
+        arena_comparison=None,
+        arena_role=None,
     ):
         """
         Initialize the AI agent service.
@@ -306,8 +309,16 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         Args:
             conversation: The chat conversation instance
             user: The authenticated user instance, only used for dynamic feature flags
+            arena_comparison: When set, this run is one candidate of a blind arena
+                comparison: nothing is persisted on the conversation, the answer and
+                its metrics land on the comparison for the given ``arena_role``
+                (``champion`` or ``challenger``) and are committed by the vote.
         """
         self.conversation = conversation
+        self._arena_comparison = arena_comparison
+        self._arena_role = arena_role
+        self._arena_started_at: float | None = None
+        self._arena_first_token_at: float | None = None
         self.user = user  # authenticated user only
         self.model_hrid = model_hrid or settings.LLM_DEFAULT_MODEL_HRID  # HRID of the model to use
         self.model_configuration = get_model_configuration(self.model_hrid)
@@ -425,6 +436,53 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
     # Async internals
     # --------------------------------------------------------------------- #
 
+    async def _on_llm_error(self, messages: List[UIMessage], error_code: str) -> None:
+        """Keep the user bubble on a normal turn; record the failure on an arena candidate.
+
+        A failing champion candidate also keeps the user bubble, like a normal turn:
+        the production answer is what the history falls back to, so its failure must
+        leave the question visible on reload.
+        """
+        if self._arena_comparison is not None:
+            await sync_to_async(self._arena_record)(error=error_code)
+            if self._arena_role != "champion":
+                return
+        if messages:
+            await self._persist_user_message_on_error(messages[-1])
+
+    def _arena_record(
+        self,
+        *,
+        payload: dict | None = None,
+        usage: Dict[str, Union[int, float]] | None = None,
+        error: str = "",
+        web_search_used: bool = False,
+    ) -> None:
+        """Store this candidate's answer (or failure) and timings on the arena comparison."""
+        started = self._arena_started_at
+        now = time.monotonic()
+        latency_ms = int((now - started) * 1000) if started is not None else None
+        first_token_ms = (
+            int((self._arena_first_token_at - started) * 1000)
+            if started is not None and self._arena_first_token_at is not None
+            else None
+        )
+        message_id = self._model_response_message_id or ""
+        trace_id = message_id[len("trace-") :] if message_id.startswith("trace-") else ""
+        arena_service.record_side_result(
+            self._arena_comparison,
+            self._arena_role,
+            payload=payload,
+            prompt_tokens=int(usage["promptTokens"]) if usage else None,
+            completion_tokens=int(usage["completionTokens"]) if usage else None,
+            co2_impact=float(usage["co2_impact"]) if usage else None,
+            latency_ms=latency_ms,
+            first_token_ms=first_token_ms,
+            trace_id=trace_id,
+            error=error,
+            web_search_used=web_search_used,
+        )
+
     async def _persist_user_message_on_error(self, user_message: UIMessage) -> None:
         """Persist the user message when an LLM error prevents normal finalization.
 
@@ -465,6 +523,10 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         here (with markers already stamped), the rebuild step short-circuits via
         the "last message is user" guard and the marked version stands.
         """
+        if self._arena_comparison is not None:
+            # A candidate must not touch the conversation; the rebuilt bubble is
+            # committed with the winner instead.
+            return
         if self.conversation.messages and self.conversation.messages[-1].role == "user":
             return
         self.conversation.messages = list(self.conversation.messages) + [user_message]
@@ -510,6 +572,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
     ):
         """Stream the agent run as a Vercel AI SDK UI message stream."""
         await self._clean()
+        self._arena_started_at = time.monotonic()
         translator = V4ToV5Translator()
         with ExitStack() as stack:
             if self._langfuse_available:
@@ -534,6 +597,10 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             try:
                 async for event in self._run_agent(messages, force_web_search):
                     for translated in translator.translate(event):
+                        if self._arena_first_token_at is None and isinstance(
+                            translated, events_v5.TextDeltaEvent
+                        ):
+                            self._arena_first_token_at = time.monotonic()
                         yield self.event_encoder.encode(translated)
             except (ModelHTTPError, HTTPValidationError, SDKError) as exc:
                 # HTTPValidationError and SDKError are mistral-specific exceptions not
@@ -550,8 +617,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                     self.conversation.pk,
                     exc,
                 )
-                if messages:
-                    await self._persist_user_message_on_error(messages[-1])
+                await self._on_llm_error(messages, error_code)
                 error_event = events_v4.ErrorPart(error=error_code)
                 for translated in translator.translate(error_event):
                     yield self.event_encoder.encode(translated)
@@ -561,8 +627,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                     self.conversation.pk,
                     exc,
                 )
-                if messages:
-                    await self._persist_user_message_on_error(messages[-1])
+                await self._on_llm_error(messages, "model_connection_error")
                 error_event = events_v4.ErrorPart(error="model_connection_error")
                 for translated in translator.translate(error_event):
                     yield self.event_encoder.encode(translated)
@@ -572,11 +637,16 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                     self.conversation.pk,
                     exc,
                 )
-                if messages:
-                    await self._persist_user_message_on_error(messages[-1])
+                await self._on_llm_error(messages, "summarization_failed")
                 error_event = events_v4.ErrorPart(error="summarization_failed")
                 for translated in translator.translate(error_event):
                     yield self.event_encoder.encode(translated)
+            except StreamCancelException:
+                # User pressed stop. An arena candidate must still close its side so
+                # the vote endpoint can resolve the comparison instead of waiting.
+                if self._arena_comparison is not None:
+                    await sync_to_async(self._arena_record)(error="cancelled")
+                raise
 
             for translated in translator.flush():
                 yield self.event_encoder.encode(translated)
@@ -1343,8 +1413,14 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         self._web_search_tool_registered = True
 
     def _setup_presentation_tool(self) -> None:
-        """Register the slide deck generation tool when the feature is enabled."""
+        """Register the slide deck generation tool when the feature is enabled.
+
+        Never registered in arena mode: a losing candidate must not leave a generated
+        file behind (see ``arena.SIDE_EFFECT_TOOL_NAMES``).
+        """
         if self._presentation_tool_registered or not self._is_presentation_generation_enabled:
+            return
+        if self._arena_comparison is not None:
             return
 
         @self.conversation_agent.tool(
@@ -1648,9 +1724,13 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             image_actions=image_actions,
         )
 
-        generated_title = await self._generate_title_if_needed()
-
-        await sync_to_async(self.conversation.save)()
+        if self._arena_comparison is None:
+            generated_title = await self._generate_title_if_needed()
+            await sync_to_async(self.conversation.save)()
+        else:
+            # The candidate is stored on the comparison; the conversation is only
+            # written when the user picks a side. No title from a blind turn either.
+            generated_title = None
 
         cooldown_seconds = await sync_to_async(record_and_compute_cooldown)(
             self.user.pk, self.conversation_agent.configuration, request_tokens
@@ -1891,6 +1971,27 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                 "co2_impact": co2_impact,
             }
 
+        final_output_json = json.loads(
+            ModelMessagesTypeAdapter.dump_json(final_output).decode("utf-8")
+        )
+        logger.debug("final_output_json: %s", final_output_json)
+
+        if self._arena_comparison is not None:
+            # Arena candidate: hold the turn on the comparison instead of the
+            # conversation. ``usage`` is still the per-turn figure here; the vote
+            # endpoint accumulates it when it commits the winner.
+            self._arena_record(
+                payload=arena_service.build_turn_payload(
+                    request_ui_message=model_message_to_ui_message(_merged_final_output_request),
+                    output_ui_message=_output_ui_message,
+                    pydantic_messages=final_output_json,
+                    usage=usage,
+                ),
+                usage=usage,
+                web_search_used=arena_service.used_web_search(final_output),
+            )
+            return
+
         usage["co2_impact"] += self.conversation.agent_usage.get("co2_impact", 0)
         usage["promptTokens"] += self.conversation.agent_usage.get("promptTokens", 0)
         usage["completionTokens"] += self.conversation.agent_usage.get("completionTokens", 0)
@@ -1904,11 +2005,6 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             if _request_ui_message:
                 self.conversation.messages += [_request_ui_message]
         self.conversation.messages += [_output_ui_message]
-
-        final_output_json = json.loads(
-            ModelMessagesTypeAdapter.dump_json(final_output).decode("utf-8")
-        )
-        logger.debug("final_output_json: %s", final_output_json)
         self.conversation.pydantic_messages += final_output_json
 
     async def _generate_title(self) -> str | None:

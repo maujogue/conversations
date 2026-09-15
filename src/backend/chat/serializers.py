@@ -16,6 +16,7 @@ from core.file_upload.utils import generate_upload_policy
 from chat import models
 from chat.ai_sdk_types import UIMessage
 from chat.constants import IMAGE_MIME_PREFIX
+from chat.enums import ArenaRole, ArenaSide, ArenaVoteOutcome
 
 
 class ChatConversationSerializer(serializers.ModelSerializer):
@@ -32,6 +33,13 @@ class ChatConversationSerializer(serializers.ModelSerializer):
             " current model."
         ),
     )
+    pending_arena_comparison = serializers.SerializerMethodField(
+        help_text=(
+            "Blind comparison still waiting for a vote on this conversation, if any:"
+            " its id and which displayed sides have finished streaming. Never carries"
+            " a model name."
+        ),
+    )
 
     class Meta:  # pylint: disable=missing-class-docstring
         model = models.ChatConversation
@@ -44,6 +52,7 @@ class ChatConversationSerializer(serializers.ModelSerializer):
             "owner",
             "project",
             "images_skipped",
+            "pending_arena_comparison",
         ]
         read_only_fields = [
             "id",
@@ -51,7 +60,62 @@ class ChatConversationSerializer(serializers.ModelSerializer):
             "updated_at",
             "messages",
             "images_skipped",
+            "pending_arena_comparison",
         ]
+
+    @staticmethod
+    def get_pending_arena_comparison(obj) -> Optional[dict]:
+        """Describe the pending arena comparison without revealing any model.
+
+        When both answers are complete (``restorable``), they are returned so the
+        client can put the split view and its vote bar back on screen: a choice the
+        user never made survives a reload, a navigation or a new session, and is
+        only ever closed by the user picking a side.
+        """
+        # Local import: keeps the arena service out of the serializer import graph.
+        from chat.arena import (  # noqa: PLC0415 # pylint: disable=import-outside-toplevel
+            get_pending_comparison,
+        )
+
+        comparison = get_pending_comparison(obj)
+        if comparison is None:
+            return None
+        restorable = comparison.is_restorable()
+        payload = {
+            "id": str(comparison.pk),
+            "sides_finished": {
+                side: comparison.side_finished(comparison.role_for_side(side))
+                for side in (ArenaSide.LEFT, ArenaSide.RIGHT)
+            },
+            "restorable": restorable,
+            "answers": None,
+        }
+        if restorable:
+            payload["answers"] = {
+                side: comparison.payload_for_side(side)["output_ui_message"]
+                for side in (ArenaSide.LEFT, ArenaSide.RIGHT)
+            }
+        return payload
+
+    def to_representation(self, instance):
+        """Hide the champion answer of a comparison that is still waiting for a vote.
+
+        The champion answer is committed to the history as soon as it finishes so
+        nothing is ever lost, but while the user still has a choice to make it must
+        not show up as *the* answer: it is one of the two candidates returned in
+        ``pending_arena_comparison``. The user message above it stays.
+        """
+        representation = super().to_representation(instance)
+        pending = representation.get("pending_arena_comparison")
+        messages = representation.get("messages")
+        if (
+            pending
+            and pending["restorable"]
+            and messages
+            and messages[-1].get("role") == "assistant"
+        ):
+            representation["messages"] = messages[:-1]
+        return representation
 
     @staticmethod
     @extend_schema_field(serializers.BooleanField)
@@ -147,6 +211,22 @@ class ChatConversationRequestSerializer(serializers.Serializer):
         allow_blank=True,
         trim_whitespace=True,
     )
+    arena_comparison = serializers.UUIDField(
+        required=False,
+        default=None,
+        allow_null=True,
+        help_text=(
+            "Arena mode: id of the pending comparison this stream is a candidate of."
+            " The model is chosen server side from the comparison and ``arena_side``."
+        ),
+    )
+    arena_side = serializers.ChoiceField(
+        choices=[ArenaSide.LEFT.value, ArenaSide.RIGHT.value],
+        required=False,
+        default=None,
+        allow_null=True,
+        help_text="Arena mode: displayed side this stream fills (left or right).",
+    )
 
     def update(self, instance, validated_data):
         """Update method is not applicable in this context."""
@@ -155,6 +235,14 @@ class ChatConversationRequestSerializer(serializers.Serializer):
     def create(self, validated_data):
         """Create method is not applicable in this context."""
         raise NotImplementedError("`create()` should not be used in this context.")
+
+    def validate(self, attrs):
+        """Both arena parameters come together or not at all."""
+        if bool(attrs.get("arena_comparison")) != bool(attrs.get("arena_side")):
+            raise serializers.ValidationError(
+                "arena_comparison and arena_side must be provided together."
+            )
+        return attrs
 
     def validate_model_hrid(self, value):
         """Validate the model_hrid field."""
@@ -209,6 +297,36 @@ class ChatMessageCategoricalScoreSerializer(serializers.Serializer):  # pylint: 
         choices=["positive", "negative"],
         help_text="Sentiment of the score.",
     )
+
+
+class ArenaDrawSerializer(serializers.Serializer):  # pylint: disable=abstract-method
+    """Input of the arena draw: what the client knows about the coming turn."""
+
+    force_web_search = serializers.BooleanField(
+        required=False, default=False, help_text="The user forced web search for this turn."
+    )
+
+
+class ArenaVoteSerializer(serializers.Serializer):  # pylint: disable=abstract-method
+    """Input of the arena vote: a displayed side, a draw, or null to abandon."""
+
+    side = serializers.ChoiceField(
+        choices=[
+            ArenaSide.LEFT.value,
+            ArenaSide.RIGHT.value,
+            ArenaVoteOutcome.TIE.value,
+            ArenaVoteOutcome.BOTH_BAD.value,
+        ],
+        allow_null=True,
+        help_text=(
+            "Side the user preferred, or 'tie' (both good) / 'both_bad'. Null keeps the"
+            " production answer without a vote."
+        ),
+    )
+
+
+# Roles are only ever used server side; exported here so views share one source.
+ARENA_ROLES = (ArenaRole.CHAMPION.value, ArenaRole.CHALLENGER.value)
 
 
 class EditInDocsSerializer(serializers.Serializer):  # pylint: disable=abstract-method
