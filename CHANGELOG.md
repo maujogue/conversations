@@ -14,6 +14,26 @@ and this project adheres to
 - ✨(front) show two answers on arena turns and record the vote
 - ✨(front) keep an arena choice on screen until the user picks a side
 - ✨(arena) add "both good" / "both bad" votes with LM Arena style buttons
+- ✨(back) route each turn to a fast, balanced or reasoning model by question complexity
+- ✨(back) classify every turn into a domain and a task and tag traces with them
+- ✨(back) pick the reasoning effort of the reasoning tier per turn
+- ✨(front) show which model answered and why, with an Auto mode users can override
+- ✨(front) show a reasoning indicator while a reasoning model thinks
+- ✨(front) offer a second opinion from another model of the same level
+- ✨(front) move the chosen arena answer into the conversation and thank the voter
+- ✨(arena) run experiments per tier, tag comparisons and promote a tier champion
+- ✨(back) estimate CO2 with EcoLogits, including the reasoning tokens providers omit
+- ✨(back) add a benchmark command comparing candidate router models on a gold set
+- ✨(arena) push every arena vote to Langfuse as an `arena_preference` score
+- ✨(back) refresh the energy per answer of each tier weekly from our own CO2 data
+- ✨(arena) export closed comparisons as CSV or Parquet, metrics and tags only
+
+### Changed
+
+- ♻️(front) replace the raw model picker with a four-entry level selector
+- ♻️(back) serve the model list only to staff behind the dev picker flag
+- ♻️(arena) drop from the results page what the Langfuse Router dashboard shows, and
+  read model prices from the LLM configuration instead of the arena admin
 
 ### Fixed
 
