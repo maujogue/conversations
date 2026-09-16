@@ -52,8 +52,11 @@ def test_api_config(is_authenticated):
         "ENVIRONMENT": "test",
         "FEATURE_FLAGS": {
             "arena": "enabled",
+            "arena-manual": "enabled",
+            "dev-model-picker": "enabled",
             "document-upload": "enabled",
             "presentation-generation": "enabled",
+            "router": "disabled",
             "web-search": "enabled",
         },
         "FILE_UPLOAD_MODE": "presigned_url",
@@ -237,8 +240,11 @@ async def test_api_config_async(is_authenticated):
         "ENVIRONMENT": "test",
         "FEATURE_FLAGS": {
             "arena": "enabled",
+            "arena-manual": "enabled",
+            "dev-model-picker": "enabled",
             "document-upload": "enabled",
             "presentation-generation": "enabled",
+            "router": "disabled",
             "web-search": "enabled",
         },
         "FILE_UPLOAD_MODE": "presigned_url",

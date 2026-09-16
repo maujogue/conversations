@@ -1,0 +1,149 @@
+{
+  "description": "Gold set for the router classifier: real-shaped public-service turns with the tier, domain and task the team agrees on. Used by `benchmark_router_models` to compare candidate router models and as the regression set before a prompt or threshold change (docs/llm-router-spec.md sections 4 and 12).",
+  "items": [
+    {
+      "text": "Reformule ce mail pour un directeur : merci de votre retour rapide.",
+      "complexity": "simple",
+      "domain": "communication",
+      "task": "writing"
+    },
+    {
+      "text": "Traduis en anglais : la réunion est reportée à mardi prochain.",
+      "complexity": "simple",
+      "domain": "general",
+      "task": "translation"
+    },
+    {
+      "text": "Quelle est la capitale de la Slovénie ?",
+      "complexity": "simple",
+      "domain": "general",
+      "task": "qa_knowledge"
+    },
+    {
+      "text": "Corrige les fautes : Les dossier sont transmit au service concerné.",
+      "complexity": "simple",
+      "domain": "general",
+      "task": "writing"
+    },
+    {
+      "text": "Bonjour, tu peux m'aider ?",
+      "complexity": "simple",
+      "domain": "general",
+      "task": "conversation"
+    },
+    {
+      "text": "Donne-moi cinq idées de titres pour la newsletter interne du mois.",
+      "complexity": "simple",
+      "domain": "communication",
+      "task": "brainstorm_creative"
+    },
+    {
+      "text": "Résume cette phrase en dix mots : le service des ressources humaines organise une réunion d'information sur la nouvelle charte du télétravail le 12 mars à 14 heures en salle Condorcet.",
+      "complexity": "simple",
+      "domain": "hr",
+      "task": "summarization"
+    },
+    {
+      "text": "Comment écrit-on « accueil » au pluriel ?",
+      "complexity": "simple",
+      "domain": "general",
+      "task": "qa_knowledge"
+    },
+    {
+      "text": "Rédige une note de service d'une quinzaine de lignes annonçant le passage au télétravail deux jours par semaine.",
+      "complexity": "standard",
+      "domain": "hr",
+      "task": "writing"
+    },
+    {
+      "text": "Explique la procédure pour déclarer un accident de service.",
+      "complexity": "standard",
+      "domain": "hr",
+      "task": "qa_knowledge"
+    },
+    {
+      "text": "Fais une synthèse en dix points de ce compte rendu de réunion.",
+      "complexity": "standard",
+      "domain": "administrative",
+      "task": "summarization"
+    },
+    {
+      "text": "Explique la différence entre un marché à procédure adaptée et un appel d'offres ouvert.",
+      "complexity": "standard",
+      "domain": "finance",
+      "task": "qa_knowledge"
+    },
+    {
+      "text": "Rédige un courrier de refus motivé à une demande de subvention associative.",
+      "complexity": "standard",
+      "domain": "administrative",
+      "task": "writing"
+    },
+    {
+      "text": "Explique à un agent non technique ce qu'est l'authentification à deux facteurs.",
+      "complexity": "standard",
+      "domain": "it_software",
+      "task": "qa_knowledge"
+    },
+    {
+      "text": "Prépare un ordre du jour pour le comité technique sur la qualité de l'air intérieur des écoles.",
+      "complexity": "standard",
+      "domain": "environment",
+      "task": "writing"
+    },
+    {
+      "text": "Quelles sont les grandes étapes d'une procédure disciplinaire dans la fonction publique territoriale ?",
+      "complexity": "standard",
+      "domain": "hr",
+      "task": "qa_knowledge"
+    },
+    {
+      "text": "Compare trois scénarios de financement d'une cantine scolaire sur cinq ans, calcule le coût total actualisé à 3 % et recommande le meilleur en justifiant les hypothèses.",
+      "complexity": "complex",
+      "domain": "finance",
+      "task": "reasoning"
+    },
+    {
+      "text": "Analyse ce tableau de consommation énergétique par bâtiment, identifie les anomalies et propose un plan d'économies chiffré sur trois ans.",
+      "complexity": "complex",
+      "domain": "environment",
+      "task": "data_analysis"
+    },
+    {
+      "text": "Écris un script Python qui lit un CSV de délibérations, agrège par département, gère les lignes malformées et génère un rapport PDF.",
+      "complexity": "complex",
+      "domain": "it_software",
+      "task": "coding"
+    },
+    {
+      "text": "Quelles sont les conséquences juridiques d'une rupture conventionnelle collective, les étapes obligatoires et les risques contentieux ?",
+      "complexity": "complex",
+      "domain": "legal",
+      "task": "reasoning"
+    },
+    {
+      "text": "Conçois un plan de continuité d'activité pour un service de 200 agents en cas de cyberattaque, avec priorisation des fonctions critiques.",
+      "complexity": "complex",
+      "domain": "defense_security",
+      "task": "reasoning"
+    },
+    {
+      "text": "À partir de ces trois budgets prévisionnels, calcule les écarts par chapitre, explique-les et propose des arbitrages.",
+      "complexity": "complex",
+      "domain": "finance",
+      "task": "data_analysis"
+    },
+    {
+      "text": "Démontre que la somme des n premiers entiers vaut n(n+1)/2, puis généralise à la somme des carrés.",
+      "complexity": "complex",
+      "domain": "science_education",
+      "task": "reasoning"
+    },
+    {
+      "text": "Rédige un cahier des charges technique complet pour la refonte d'un site de démarches en ligne, avec les exigences RGAA et RGPD.",
+      "complexity": "complex",
+      "domain": "it_software",
+      "task": "writing"
+    }
+  ]
+}

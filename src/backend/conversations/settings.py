@@ -542,6 +542,35 @@ class Base(
         environ_name="LLM_SUMMARIZATION_MODEL_HRID",
         environ_prefix=None,
     )
+    # Router classifier (docs/llm-router-spec.md section 4). An empty model HRID
+    # means "use LLM_DEFAULT_MODEL_HRID". The timeout bounds the whole
+    # classification call; past it the router falls back to the previous tier.
+    LLM_ROUTER_MODEL_HRID = values.Value(
+        "",
+        environ_name="LLM_ROUTER_MODEL_HRID",
+        environ_prefix=None,
+    )
+    # Budget for the whole classification call. Measured on Albert with
+    # `ministral-3-8b`: 0.9 to 1.7 s per call (the first one of a process is the
+    # slowest). A tighter budget makes every turn fall back to the standard
+    # tier, which silently turns the router off.
+    LLM_ROUTER_TIMEOUT_S = values.FloatValue(
+        2.5,
+        environ_name="LLM_ROUTER_TIMEOUT_S",
+        environ_prefix=None,
+    )
+    # Router tier models (docs/llm-router-spec.md section 3.1). Blank means "use
+    # LLM_DEFAULT_MODEL_HRID", so with the router flag on and nothing configured
+    # the router is a no-op. The RoutingTierSettings admin singleton overrides them.
+    LLM_TIER_SIMPLE_MODEL_HRID = values.Value(
+        "", environ_name="LLM_TIER_SIMPLE_MODEL_HRID", environ_prefix=None
+    )
+    LLM_TIER_STANDARD_MODEL_HRID = values.Value(
+        "", environ_name="LLM_TIER_STANDARD_MODEL_HRID", environ_prefix=None
+    )
+    LLM_TIER_COMPLEX_MODEL_HRID = values.Value(
+        "", environ_name="LLM_TIER_COMPLEX_MODEL_HRID", environ_prefix=None
+    )
     LLM_FALLBACK_MODEL_HRID_1 = values.Value(
         "", environ_name="LLM_FALLBACK_MODEL_HRID_1", environ_prefix=None
     )
@@ -1276,6 +1305,11 @@ class Test(Base):
 
         for field_name in FeatureFlags.model_fields.keys():
             setattr(_feature_flags, field_name, FeatureToggle.ENABLED)
+
+        # The router changes how every turn picks its model; tests exercising it
+        # enable the flag explicitly so the rest of the suite keeps today's
+        # pinned-model behaviour.
+        _feature_flags.router = FeatureToggle.DISABLED
 
         return _feature_flags
 
