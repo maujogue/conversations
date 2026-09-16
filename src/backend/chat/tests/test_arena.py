@@ -2,10 +2,16 @@
 
 # pylint: disable=redefined-outer-name, unused-argument
 
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from threading import Barrier
 from unittest.mock import patch
 
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
+from django.core.management import call_command
+from django.db import close_old_connections
+from django.utils import timezone
 
 import pytest
 
@@ -13,8 +19,9 @@ from core.factories import UserFactory
 from core.feature_flags.flags import FeatureFlags, FeatureToggle
 
 from chat import arena
-from chat.ai_sdk_types import TextUIPart, UIMessage
-from chat.arena_results import answer_cost_eur, build_results, wilson_interval
+from chat.ai_sdk_types import FileUIPart, TextUIPart, UIMessage
+from chat.arena_results import _rate_block, answer_cost_eur, build_results, wilson_interval
+from chat.clients.pydantic_ai import AIAgentService
 from chat.enums import (
     ArenaComparisonStatus,
     ArenaContextTag,
@@ -32,6 +39,7 @@ from chat.factories import (
 )
 from chat.llm_configuration import LLModel, LLMProvider
 from chat.model_health import model_health_cache_key
+from chat.models import ChatConversation
 
 pytestmark = pytest.mark.django_db
 
@@ -392,7 +400,7 @@ def test_vote_for_champion_keeps_the_committed_answer():
 
 @pytest.mark.parametrize("outcome", [ArenaVoteOutcome.TIE, ArenaVoteOutcome.BOTH_BAD])
 def test_vote_draw_keeps_the_champion_answer_and_counts_as_a_vote(outcome):
-    """"Both good" and "both bad" are votes: recorded as such, the champion answer stays."""
+    """ "Both good" and "both bad" are votes: recorded as such, the champion answer stays."""
     comparison = ArenaComparisonFactory(champion_side="right")
     arena.record_side_result(comparison, ArenaRole.CHAMPION, payload=_payload("A"))
     arena.record_side_result(comparison, ArenaRole.CHALLENGER, payload=_payload("B"))
@@ -415,7 +423,7 @@ def test_vote_draw_when_a_side_errored_is_not_counted():
 
     resolved = arena.vote(comparison, ArenaVoteOutcome.TIE.value)
 
-    assert resolved.status == ArenaComparisonStatus.ABANDONED
+    assert resolved.status == ArenaComparisonStatus.ERRORED
     assert resolved.winner == ""
     comparison.conversation.refresh_from_db()
     assert comparison.conversation.messages[-1].content == "A"
@@ -463,7 +471,7 @@ def test_vote_for_errored_side_falls_back_to_champion():
 
     resolved = arena.vote(comparison, "right")
 
-    assert resolved.status == ArenaComparisonStatus.ABANDONED
+    assert resolved.status == ArenaComparisonStatus.ERRORED
     comparison.conversation.refresh_from_db()
     assert comparison.conversation.messages[-1].content == "A"
 
@@ -549,6 +557,10 @@ def test_build_results_scoreboard_and_position(experiment):
         "challenger_prompt_tokens": 1000,
         "challenger_completion_tokens": 1000,
         "status": ArenaComparisonStatus.VOTED,
+        "price_snapshot": {
+            "champion": {"input": "1", "output": "1"},
+            "challenger": {"input": "0.5", "output": "0.5"},
+        },
     }
     ArenaComparisonFactory(
         **common, champion_side="left", winner="challenger", context_tags=["plain"]
@@ -580,7 +592,8 @@ def test_build_results_scoreboard_and_position(experiment):
     assert row["model_hrid"] == "challenger-model"
     assert row["votes"] == 3
     assert row["wins"] == 2
-    assert row["indicative"] is False
+    assert row["sample_sufficient"] is True
+    assert row["indicative"] is True
     assert row["cost_ratio"] == 2.0
     assert {(r["tag"], r["votes"], r["wins"]) for r in results["by_context"]} == {
         ("plain", 2, 2),
@@ -624,3 +637,279 @@ def test_tools_stripped_follows_presentation_flag(settings, experiment):
         )
 
     assert comparison.tools_stripped is True
+
+
+def test_late_result_after_cancellation_cannot_modify_a_new_turn():
+    """An old worker cannot append content or usage after a newer turn finishes."""
+    comparison = ArenaComparisonFactory()
+    stale = type(comparison).objects.get(pk=comparison.pk)
+    arena.vote(comparison, None)
+    arena.resolve_pending(comparison.conversation)
+    arena.commit_payload(comparison.conversation, _payload("New answer"))
+    before = list(comparison.conversation.pydantic_messages)
+    arena.record_side_result(stale, ArenaRole.CHAMPION, payload=_payload("Late answer"))
+    comparison.refresh_from_db()
+    comparison.conversation.refresh_from_db()
+    assert comparison.conversation.pydantic_messages == before
+    assert not comparison.champion_committed
+    assert comparison.champion_payload is None
+
+
+def test_result_and_vote_reject_a_superseded_conversation_version():
+    """A stale pending status alone is insufficient to authorize a commit or swap."""
+    comparison = ArenaComparisonFactory()
+    arena.record_side_result(comparison, ArenaRole.CHAMPION, payload=_payload("A"))
+    arena.record_side_result(comparison, ArenaRole.CHALLENGER, payload=_payload("B"))
+    conversation = comparison.conversation
+    conversation.arena_version += 1
+    conversation.save(update_fields=["arena_version"])
+    arena.commit_payload(conversation, _payload("New answer"))
+    with pytest.raises(arena.ArenaConflict):
+        arena.vote(comparison, "right")
+    conversation.refresh_from_db()
+    assert conversation.messages[-1].content == "New answer"
+
+
+def test_result_commit_rolls_back_with_comparison_save():
+    """Conversation content and the committed marker share one transaction."""
+    comparison = ArenaComparisonFactory()
+    with patch.object(type(comparison), "save", side_effect=RuntimeError("write failed")):
+        with pytest.raises(RuntimeError, match="write failed"):
+            arena.record_side_result(comparison, ArenaRole.CHAMPION, payload=_payload("A"))
+    comparison.refresh_from_db()
+    comparison.conversation.refresh_from_db()
+    assert comparison.conversation.messages == []
+    assert not comparison.champion_committed
+    arena.record_side_result(comparison, ArenaRole.CHAMPION, payload=_payload("A"))
+    assert comparison.champion_committed
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_duplicate_results_commit_once():
+    """Two stale worker objects cannot append the same champion turn twice."""
+
+    comparison = ArenaComparisonFactory()
+    barrier = Barrier(2)
+
+    def finish():
+        close_old_connections()
+        try:
+            worker = type(comparison).objects.get(pk=comparison.pk)
+            barrier.wait(timeout=10)
+            arena.record_side_result(worker, ArenaRole.CHAMPION, payload=_payload("A"))
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda _: finish(), range(2)))
+    comparison.refresh_from_db()
+    conversation = comparison.conversation
+    assert [m.content for m in conversation.messages] == ["Hello", "A"]
+    assert conversation.agent_usage["promptTokens"] == 10
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_candidate_claims_have_one_winner(experiment):
+    """PostgreSQL serializes competing claims before either calls the provider."""
+
+    conversation = ChatConversationFactory()
+    comparison = arena.draw_comparison(
+        conversation=conversation, user=conversation.owner, force_web_search=False
+    )
+    barrier = Barrier(2)
+    message = UIMessage.model_validate(_payload("A")["request_ui_message"])
+
+    def claim():
+        close_old_connections()
+        try:
+            worker = type(comparison).objects.get(pk=comparison.pk)
+            barrier.wait(timeout=10)
+            try:
+                arena.claim_candidate(worker, ArenaRole.CHAMPION, message)
+                return "claimed"
+            except arena.ArenaConflict:
+                return "conflict"
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(lambda _: claim(), range(2))) == ["claimed", "conflict"]
+
+
+@pytest.mark.parametrize("delete_via", ["instance", "queryset", "user"])
+def test_deletion_erases_content_and_user_links(delete_via):
+    """Keep aggregate metrics, never prompt/answer copies or personal associations."""
+
+    comparison = ArenaComparisonFactory(
+        input_snapshot={"prompt": "private question"},
+        theme="private theme",
+        champion_trace_id="private trace",
+    )
+    arena.record_side_result(comparison, ArenaRole.CHAMPION, payload=_payload("Private answer"))
+    stale = type(comparison).objects.get(pk=comparison.pk)
+    if delete_via == "user":
+        comparison.user.delete()
+    elif delete_via == "queryset":
+        ChatConversation.objects.filter(pk=comparison.conversation_id).delete()
+    else:
+        comparison.conversation.delete()
+    arena.record_side_result(stale, ArenaRole.CHALLENGER, payload=_payload("Late private answer"))
+    comparison.refresh_from_db()
+    assert comparison.conversation_id is None
+    assert comparison.user_id is None
+    assert comparison.input_snapshot is None
+    assert comparison.champion_payload is None
+    assert comparison.challenger_payload is None
+    assert comparison.champion_trace_id == comparison.theme == ""
+    assert comparison.status == ArenaComparisonStatus.ERRORED
+
+
+def test_retention_purge_is_idempotent_and_preserves_metrics():
+    """Only content and associations older than 90 days are removed."""
+
+    old = ArenaComparisonFactory(
+        drawn_at=timezone.now() - timedelta(days=91),
+        champion_payload=_payload("Private"),
+        input_snapshot={"prompt": "private"},
+        status=ArenaComparisonStatus.VOTED,
+        winner=ArenaRole.CHAMPION,
+        champion_prompt_tokens=123,
+    )
+    recent = ArenaComparisonFactory(champion_payload=_payload("Recent"))
+    call_command("purge_arena_content")
+    call_command("purge_arena_content")
+    old.refresh_from_db()
+    recent.refresh_from_db()
+    assert old.champion_payload is None and old.input_snapshot is None
+    assert old.user_id is None and old.conversation_id is None
+    assert old.status == ArenaComparisonStatus.VOTED
+    assert old.winner == ArenaRole.CHAMPION and old.champion_prompt_tokens == 123
+    assert recent.champion_payload is not None
+
+
+def test_pending_comparisons_are_in_vote_coverage_denominator(experiment):
+    """Ten votes and ninety pending comparisons mean 10% coverage."""
+    ArenaComparisonFactory.create_batch(
+        10, experiment=experiment, status=ArenaComparisonStatus.VOTED
+    )
+    ArenaComparisonFactory.create_batch(90, experiment=experiment)
+    header = build_results(experiment)["header"]
+    assert header["vote_rate"] == 0.1
+    assert header["closed_vote_rate"] == 1.0
+    assert header["pending"] == 90
+
+
+def test_vote_threshold_does_not_imply_sufficient_evidence():
+    """51/100 remains indicative; sample size and interval separation are distinct."""
+
+    block = _rate_block(51, 100, 100)
+    assert block["sample_sufficient"]
+    assert not block["evidence_sufficient"]
+    assert block["indicative"]
+    assert _rate_block(70, 100, 100)["evidence_sufficient"]
+
+
+def test_prices_are_frozen_at_candidate_claim(experiment):
+    """Editing either model's configured prices cannot change recorded call costs."""
+    experiment.champion_input_price_eur_per_mtok = 1
+    experiment.champion_output_price_eur_per_mtok = 2
+    experiment.save()
+    conversation = ChatConversationFactory()
+    comparison = arena.draw_comparison(
+        conversation=conversation, user=conversation.owner, force_web_search=False
+    )
+    comparison = arena.claim_candidate(
+        comparison,
+        ArenaRole.CHAMPION,
+        UIMessage.model_validate(_payload("A")["request_ui_message"]),
+    )
+    arena.record_side_result(
+        comparison,
+        ArenaRole.CHAMPION,
+        payload=_payload("A"),
+        prompt_tokens=1000,
+        completion_tokens=1000,
+    )
+    before = build_results(experiment)["header"]["total_cost_eur"]
+    experiment.champion_input_price_eur_per_mtok = 10
+    experiment.champion_output_price_eur_per_mtok = 20
+    experiment.save()
+    assert before is not None
+    assert build_results(experiment)["header"]["total_cost_eur"] == before
+    assert comparison.price_snapshot["champion"]["captured_at"]
+
+
+def test_legacy_calls_without_prices_are_unknown(experiment):
+    ArenaComparisonFactory(experiment=experiment, champion_prompt_tokens=1000)
+    header = build_results(experiment)["header"]
+    assert header["total_cost_eur"] is None
+    assert header["unpriced_answers"] == 1
+
+
+def test_challenger_failure_is_not_abandonment(experiment):
+    comparison = ArenaComparisonFactory(experiment=experiment)
+    arena.record_side_result(comparison, ArenaRole.CHAMPION, payload=_payload("A"))
+    arena.record_side_result(comparison, ArenaRole.CHALLENGER, error="model_connection_error")
+    arena.vote(comparison, None)
+    results = build_results(experiment)
+    assert results["header"]["abandoned"] == 0
+    assert results["header"]["errored"] == 1
+    assert results["header"]["failure_reasons"] == {"candidate_failed": 1}
+    assert results["champion"]["failures"] == 0
+    assert results["challengers"][0]["failures"] == 1
+
+
+def test_snapshot_freezes_existing_history_summary_and_files(experiment):
+
+    conversation = ChatConversationFactory(
+        pydantic_messages=[{"kind": "request", "parts": []}],
+        history_summary="Original summary",
+    )
+    message = UIMessage(
+        id="u1",
+        role="user",
+        parts=[
+            TextUIPart(type="text", text="Original question"),
+            FileUIPart(
+                type="file", mediaType="text/plain", url="https://example.test/original.txt"
+            ),
+        ],
+    )
+    comparison = arena.draw_comparison(
+        conversation=conversation,
+        user=conversation.owner,
+        force_web_search=True,
+        last_message=message,
+    )
+    conversation.pydantic_messages = []
+    conversation.history_summary = "New summary"
+    conversation.save(update_fields=["pydantic_messages", "history_summary"])
+    message.parts[0].text = "Changed"
+    comparison = arena.claim_candidate(comparison, ArenaRole.CHALLENGER, message)
+    frozen = arena.snapshot_conversation(conversation, comparison)
+    assert frozen.history_summary == "Original summary"
+    assert len(frozen.pydantic_messages) == 1
+    assert (
+        comparison.input_snapshot["request_ui_message"]["parts"][0]["text"] == "Original question"
+    )
+    assert comparison.input_snapshot["request_ui_message"]["parts"][1]["url"].endswith(
+        "original.txt"
+    )
+    assert comparison.input_snapshot["force_web_search"] is True
+
+
+def test_older_normal_turn_cannot_roll_back_arena_version(experiment):
+    """A normal worker created before the draw cannot overwrite the new turn."""
+
+    conversation = ChatConversationFactory()
+    service = AIAgentService(conversation=conversation, user=conversation.owner)
+    comparison = arena.draw_comparison(
+        conversation=conversation, user=conversation.owner, force_web_search=False
+    )
+    service.conversation.messages = [
+        UIMessage.model_validate(_payload("Old answer")["output_ui_message"])
+    ]
+    assert service._save_completed_conversation() is False
+    conversation.refresh_from_db()
+    assert conversation.arena_version == comparison.conversation_version
+    assert conversation.messages == []

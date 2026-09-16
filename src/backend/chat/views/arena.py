@@ -15,7 +15,6 @@ from rest_framework.response import Response
 
 from chat import arena as arena_service
 from chat import models, serializers
-from chat.enums import ArenaComparisonStatus
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +54,7 @@ class ArenaMixin:
             conversation=conversation,
             user=request.user,
             force_web_search=serializer.validated_data["force_web_search"],
+            last_message=serializer.validated_data.get("message"),
         )
         if comparison is None:
             return Response({"arena": False}, status=status.HTTP_200_OK)
@@ -85,7 +85,7 @@ class ArenaMixin:
         conversation.refresh_from_db()
         return Response(self.get_serializer(conversation).data, status=status.HTTP_200_OK)
 
-    def _resolve_arena_stream_params(self, conversation, validated_query_params):
+    def _resolve_arena_stream_params(self, conversation, validated_query_params, message):
         """Turn the arena query parameters into ``(comparison, role, model_hrid)``.
 
         Raises ``NotFound`` when the comparison does not belong to this conversation
@@ -96,11 +96,9 @@ class ArenaMixin:
         if not comparison_id:
             return None
         comparison = self._get_pending_comparison_or_404(conversation, comparison_id)
-        if comparison.status != ArenaComparisonStatus.PENDING:
-            return Response({"error": "arena_comparison_closed"}, status=status.HTTP_409_CONFLICT)
         role = comparison.role_for_side(side)
-        if comparison.side_finished(role):
-            return Response(
-                {"error": "arena_side_already_answered"}, status=status.HTTP_409_CONFLICT
-            )
+        try:
+            comparison = arena_service.claim_candidate(comparison, role, message)
+        except arena_service.ArenaConflict as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_409_CONFLICT)
         return comparison, role, comparison.model_hrid_for_side(side)

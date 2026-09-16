@@ -93,8 +93,9 @@ the vote button variant or emphasis nudges the choice.
    safety net is hidden from the history while the choice is open. The choice
    is only ever closed by the user picking a side: sending another message is
    refused with a "pick an answer to continue" note until they do. A
-   comparison that never got its two answers has nothing to compare and is
-   abandoned on the next load, keeping the champion's answer.
+   comparison with an unfinished candidate remains pending: reading history
+   never cancels active work. An explicit cancellation or a new turn closes it,
+   keeping any champion answer already committed.
 8. The challenger stream fails: comparison marked errored, champion answer
    committed. The champion stream fails: comparison marked errored, the
    normal error path applies (no answer committed), the challenger answer
@@ -181,14 +182,29 @@ shows the champion. Record the side.
   messages produced by each model. The champion's is committed as soon as it
   is recorded; the challenger's is held until a vote.
 - experiment FK is PROTECT: deleting an experiment that has comparisons is
-  refused, deactivate it instead. Loser payload kept for
-  analysis, purge after 90 days (management command, v2 if no time).
+  refused; deactivate it instead.
+- input_snapshot (JSON): the history, summary, current user message and forced
+  search flag shared by both candidates. Message attachments are included in
+  the frozen user input. Tool searches still run independently.
+- conversation_version and per-candidate started_at: guarded turn ownership and
+  a single atomic inference claim per candidate.
+- price_snapshot (JSON): per-candidate EUR prices per million tokens and capture
+  timestamp, recorded at inference claim. Historical results use these values;
+  legacy calls without recorded prices are shown as unknown, not repriced.
+- closed_reason: distinguishes candidate failures, cancellation, superseded
+  turns, deletion and retention expiry from user abandonment.
 
-No prompt text is duplicated into the comparison. The prompt already lives in
-the conversation and in Langfuse via trace ids.
+Snapshots and candidate payloads contain copies of conversation content. Their
+retention period is 90 days from the draw. Run
+`python manage.py purge_arena_content` daily. The command erases both payloads, the input snapshot,
+trace identifiers, free-text fields and the conversation/user associations,
+while preserving anonymous outcomes, token counts, timings and recorded prices.
+Conversation or user deletion applies the same redaction immediately, including
+admin, bulk and cascading deletions. Late workers cannot repopulate erased data.
 
-Derived, computed at query time: cost per answer =
-prompt_tokens * input_price + completion_tokens * output_price.
+Cost per answer is computed from recorded token counts and the price snapshot,
+with prices divided by one million. The dashboard labels partial subtotals and
+shows the number of answers without recorded prices.
 
 ## 7. Backend API
 
@@ -218,17 +234,16 @@ Base: existing `ChatViewSet` under `/api/v1.0/chats/{id}/`.
 - Validation: comparison belongs to this conversation and user (404
   otherwise), is pending and the side has not run yet (409 otherwise); both
   parameters must come together (400). `model_hrid` is ignored in arena mode.
-- Stop: the user's stop closes both candidate sides with the error
-  `cancelled`; the client drops the split and keeps the question on screen,
-  the comparison is resolved as errored on the next turn.
+- Stop: the server closes the pending comparison immediately with reason
+  `cancelled`; the client drops the split and keeps the question on screen.
+  Late candidate results cannot commit content after this transition.
 - The existing stop-streaming poison pill is per conversation, so one stop
   cancels both streams.
 
 `POST /chats/{id}/arena/{comparison_id}/vote/`
-- Body: `{"side": "left" | "right" | null}`. `null` abandons: the client
-  uses it when a reloaded conversation carries a pending comparison that can
-  no longer be shown (a missing answer), never for a comparison the user can
-  still vote on.
+- Body: `{"side": "left" | "right" | "tie" | "both_bad" | null}`.
+  `null` explicitly closes without a vote. Initialization never submits it
+  merely because a candidate is still running.
 - Atomically: append the winner payload to the conversation (messages,
   pydantic_messages, agent_usage merge), set status voted, winner, voted_at,
   time_to_vote_ms. Returns the updated conversation serializer. No model
@@ -308,14 +323,16 @@ experiments uses the standard model permissions.
   challenger, tag, date.
 
 Results view (server-rendered template, one page):
-- Header: votes, abandoned, errored, vote rate, total arena cost, and a
+- Header: votes, abandoned, errored, pending, votes / all comparisons,
+  votes / closed comparisons (including errors), recorded cost subtotal, and a
   visible "seed data" banner when the experiment contains seeded rows.
 - Challenger table: challenger, n votes, win rate against the champion,
   95 percent Wilson interval, always shown; labeled "indicative" when
-  n < min_votes_for_conclusion. Then mean cost per answer for challenger and champion
-  on those turns, cost ratio, mean completion tokens, mean latency, mean co2.
+  n < min_votes_for_conclusion or the interval includes 50%. Sample sufficiency
+  and evidence of a preference are separate. Then mean cost per answer for
+  challenger and champion on those turns, cost ratio, mean completion tokens, mean latency, mean co2.
 - By-context table per challenger: tag, n votes, win rate, interval, same
-  "indicative" label under the threshold. Tag filter applies to the challenger table too.
+  "indicative" rule. Tag filter applies to the challenger table too.
 - Position check: left win rate across all votes (expect near 50 percent).
 - With several challengers the challenger table sorted by win rate is the
   scoreboard. No Bradley-Terry needed since every vote is against the same
@@ -481,8 +498,8 @@ review; 6 and 7 are independent of 2 to 5.
 - Reload after both answers arrived, without voting: the split and its vote
   bar come back, the comparison is still pending and the history shows the
   question alone. A new message is refused until a side is picked.
-- Reload with only one answer stored: abandoned comparison, the champion's
-  answer is in the history.
+- Reload with only one answer stored: the comparison stays pending and the
+  champion's answer remains in history; no automatic abandonment request.
 - Killing the challenger provider: errored comparison, champion answer
   committed, no visible error to the user beyond the split collapsing.
 - Attachment, project and forced web search turns trigger arena with the
@@ -512,8 +529,9 @@ review; 6 and 7 are independent of 2 to 5.
   the headline, slices are the follow-up.
 - **Search noise.** Two independent web searches per turn may return
   different sources. Wanted: it measures how well each model drives search.
-- **Privacy.** Loser payload 90 days, prompts not duplicated, user ids in
-  admin only.
+- **Privacy.** Input snapshots and both candidate payloads are retained for at
+  most 90 days, with immediate redaction on conversation/user deletion. Anonymous
+  metrics remain independent of content and personal associations.
 - **Champion drift.** If the health fallback routes new conversations to a
   fallback model, those conversations are not eligible (their pinned model
   is not the champion). The results page should show how many draws were
@@ -530,3 +548,50 @@ review; 6 and 7 are independent of 2 to 5.
    check, tag slices.
 5. Close: "this is the tool that turns 'we use Mistral because we must'
    into 'we use Mistral because agents prefer it', or not".
+
+## 17. Reliability rollout
+
+Stop or drain existing application workers, run `python manage.py migrate`, and
+restart with the updated backend and frontend. Migration `0018_arena_reliability`
+closes legacy pending comparisons that lack a frozen input, corrects abandoned
+rows with challenger failures, and removes content and user links from legacy
+orphan records. Existing conversation answers remain available. Historical prices
+cannot be reconstructed and remain unknown. Configure a daily invocation of
+`python manage.py purge_arena_content`; it is safe to retry.
+
+Candidate claims, result commits, votes and deletion follow the same lock order:
+conversation first, then comparison. A candidate can be claimed only once, and a
+result can be recorded only once while the comparison is pending and its turn
+version still matches. Champion content and its committed marker are saved in
+one transaction. Initialization is read-only; it cannot infer abandonment from
+an unfinished stream. Arena self-documentation returns the same neutral payload
+for both candidates; legacy tool outputs are anonymized on restore and before
+being reused as model history.
+
+Validation on 2026-09-16 used Python 3.14.7, PostgreSQL 16.2 and Node 22.23.2
+with the project lockfiles in an isolated temporary environment:
+
+- 78 Arena, self-documentation and migration tests passed, including real
+  PostgreSQL concurrent claims/commits, rollback, cancellation, deletion,
+  snapshot consistency, tool-stream anonymity, pricing and metric semantics.
+- All 444 frontend tests passed. The new handoff regression exercises delayed
+  initialization, both candidate streams and a successful explicit vote.
+- Production frontend build, affected-file ESLint, Python Ruff checks/formatting
+  and `makemigrations --check --dry-run` passed.
+- The expanded backend selection passed 165 of 169 tests. Four existing history
+  assertions also failed on an unmodified HEAD checkout: the two variants of
+  `test_post_conversation_data_protocol_with_history`,
+  `test_post_conversation_with_existing_image_history`, and
+  `test_post_conversation_with_existing_tool_history`. They expect older CO2 or
+  provider metadata and were left outside this repair's scope.
+
+The focused backend selection is reproducible from `src/backend` in the normal
+test environment:
+
+```sh
+pytest chat/tests/test_arena.py \
+  chat/tests/test_arena_admin.py \
+  chat/tests/test_arena_migrations.py \
+  chat/tests/views/chat/conversations/test_arena.py \
+  chat/tests/tools/test_self_documentation.py
+```

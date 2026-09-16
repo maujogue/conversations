@@ -1,3 +1,5 @@
+import { UIMessage } from 'ai';
+
 import { APIError, errorCauses, fetchAPI } from '@/api';
 import { ChatConversation } from '@/features/chat/types';
 
@@ -19,11 +21,12 @@ const NO_ARENA: ArenaDraw = { arena: false };
 export const drawArena = async (
   conversationId: string,
   forceWebSearch: boolean,
+  message?: UIMessage,
 ): Promise<ArenaDraw> => {
   try {
     const response = await fetchAPI(`chats/${conversationId}/arena/draw/`, {
       method: 'POST',
-      body: JSON.stringify({ force_web_search: forceWebSearch }),
+      body: JSON.stringify({ force_web_search: forceWebSearch, message }),
     });
     if (!response.ok) {
       return NO_ARENA;

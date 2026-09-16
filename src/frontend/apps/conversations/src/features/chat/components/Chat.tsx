@@ -32,7 +32,7 @@ import { useConfig, useFeatureEnabled } from '@/core';
 import { useProjectAttachments } from '@/features/attachments/api/useProjectAttachments';
 import { useReindexProjectAttachment } from '@/features/attachments/api/useReindexProjectAttachment';
 import { useUploadFile } from '@/features/attachments/hooks/useUploadFile';
-import { drawArena, voteArena } from '@/features/chat/api/useArena';
+import { drawArena } from '@/features/chat/api/useArena';
 import {
   ImagesSkippedEventKind,
   stampImagesSkippedOnLatestUserMessage,
@@ -419,8 +419,8 @@ export const Chat = ({
   const handleStop = () => {
     void stopGeneration();
     // Stopping an arena turn drops the split: the poison pill ends both
-    // candidate streams and the backend closes the comparison on the next
-    // turn. The question stays on screen so the user can rephrase it.
+    // candidate streams and the backend closes the comparison immediately.
+    // The question stays on screen so the user can rephrase it.
     if (arena) {
       setArena(null);
       setArenaStreaming(false);
@@ -851,14 +851,11 @@ export const Chat = ({
     async function fetchInitialMessages() {
       if (initialConversationId && !pendingInput) {
         try {
-          let conversation = await getConversation({
+          const conversation = await getConversation({
             id: initialConversationId,
           });
-          // A comparison left without a vote (reload, navigation) is not
-          // resolved behind the user's back: when both answers are there, it is
-          // put back on screen below and stays until a side is picked. Only a
-          // comparison that never got its two answers — nothing to choose
-          // between — is abandoned, keeping the production answer.
+          // History initialization is read-only. An incomplete comparison may
+          // still be streaming in this page or another tab.
           const pending = conversation.pending_arena_comparison;
           const lastMessage = conversation.messages.at(-1);
           let restoredArena: typeof arena = null;
@@ -874,16 +871,6 @@ export const Chat = ({
               userMessageId: lastMessage.id,
               restoredAnswers: pending.answers,
             };
-          } else if (pending) {
-            try {
-              conversation = await voteArena(
-                initialConversationId,
-                pending.id,
-                null,
-              );
-            } catch {
-              // Already closed: the snapshot above is good enough.
-            }
           }
           if (!ignore) {
             // v5 keeps the messages inside the chat instance, which was built
@@ -1056,14 +1043,18 @@ export const Chat = ({
     hasSentRef.current = true;
     const fileParts = toFileParts(attachments);
     if (arenaEnabled && targetConversationId) {
-      const draw = await drawArena(targetConversationId, forceWebSearch);
+      const userMessageId = `arena-user-${Date.now()}`;
+      const userMessage: UIMessage = {
+        id: userMessageId,
+        role: 'user',
+        parts: [{ type: 'text', text }, ...fileParts],
+      };
+      const draw = await drawArena(
+        targetConversationId,
+        forceWebSearch,
+        userMessage,
+      );
       if (draw.arena) {
-        const userMessageId = `arena-user-${Date.now()}`;
-        const userMessage: UIMessage = {
-          id: userMessageId,
-          role: 'user',
-          parts: [{ type: 'text', text }, ...fileParts],
-        };
         setMessages((prev) => [...prev, userMessage]);
         setArena({
           comparisonId: draw.comparison_id,

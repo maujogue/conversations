@@ -1,0 +1,24 @@
+{
+  "prompt": "Cas fictif. Réécris ce message administratif en moins de 100 mots, sans ajouter de nouvelles informations : Madame Martin, votre dossier de formation est incomplet car il manque l’attestation de formation. Merci de la transmettre avant le 21 septembre 2026 à 17 h. Aucune décision d’acceptation n’a encore été prise. Signature : Service formation.",
+  "comparisonDurationMs": 1200,
+  "url": "http://127.0.0.1:23001/chat/b30ff711-4875-4b03-9b31-e1d57cc7086a",
+  "sides": [
+    "Réponse AAssistant IA a répondu : Madame Martin,Votre dossier de formation reste incomplet ; il manque l’attestation de formation. Merci de la transmettre avant le 21 septembre 2026, 17 h. Aucune décision d’acceptation n’a encore été prise.Service formation",
+    "Réponse BAssistant IA a répondu : Madame Martin, votre dossier de formation est incomplet : l’attestation de formation manque. Merci de l’envoyer avant le 21/09/2026 à 17h. Aucune décision n’a encore été prise. Service formation."
+  ],
+  "responses": [
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:28072/api/v1.0/chats/b30ff711-4875-4b03-9b31-e1d57cc7086a/conversation/?arena_comparison=8286a053-932d-4da7-9758-47a622c60e52&arena_side=left"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:28072/api/v1.0/chats/b30ff711-4875-4b03-9b31-e1d57cc7086a/conversation/?arena_comparison=8286a053-932d-4da7-9758-47a622c60e52&arena_side=right"
+    }
+  ],
+  "errors": [],
+  "voteHTTP": 200,
+  "voted": true,
+  "persistedText": "Vous avez dit :\n\nCas fictif. Réécris ce message administratif en moins de 100 mots, sans ajouter de nouvelles informations : Madame Martin, votre dossier de formation est incomplet car il manque l’attestation de formation. Merci de la transmettre avant le 21 septembre 2026 à 17 h. Aucune décision d’acceptation n’a encore été prise. Signature : Service formation.\n\nAssistant IA a répondu :\n\nMadame Martin,\n\nVotre dossier de formation reste incomplet ; il manque l’attestation de formation. Merci de la transmettre avant le 21 septembre 2026, 17 h. Aucune décision d’acceptation n’a encore été prise.\n\nService formation\n\narrow_downward\nPoser une question\nTransformer cette liste en points à puces\nÉcrire une description courte du produit\nTrouver les dernières actualités concernant...\nPoser une question\nattach_file\nJoindre un fichier\nlanguage\nRechercher sur le web\n🤖\nkeyboard_arrow_down\narrow_upward\nL'Assistant peut faire des erreurs. Veuillez vérifier toutes les informations importantes.",
+  "noPendingArena": true
+}

@@ -3,8 +3,8 @@
 Everything here is read-only and deliberately simple: every vote is a challenger
 against the same champion, so a sorted win-rate table is the scoreboard and no
 pairwise ranking model is needed. Win rates come with a Wilson score interval and
-an "indicative" flag under the experiment's vote threshold. The flag is a label,
-never a gate: the numbers are always shown.
+an "indicative" flag while the sample is small or its interval includes 50%.
+The flag is a label, never a gate: the numbers are always shown.
 """
 
 import math
@@ -37,6 +37,45 @@ def answer_cost_eur(prompt_tokens, completion_tokens, input_price, output_price)
     return (prompt * Decimal(input_price or 0) + completion * Decimal(output_price or 0)) / MTOK
 
 
+def recorded_answer_cost(comparison, role) -> Decimal | None:
+    """Never reprice historical inference using the experiment's current settings."""
+    prices = comparison.price_snapshot.get(role)
+    if not prices or prices.get("input") is None or prices.get("output") is None:
+        return None
+    return answer_cost_eur(
+        getattr(comparison, f"{role}_prompt_tokens"),
+        getattr(comparison, f"{role}_completion_tokens"),
+        prices["input"],
+        prices["output"],
+    )
+
+
+def _failure_block(comparisons, role):
+    attempts = [c for c in comparisons if getattr(c, f"{role}_started_at") or c.side_finished(role)]
+    failures = sum(
+        bool(getattr(c, f"{role}_error"))
+        and getattr(c, f"{role}_error")
+        not in (
+            "cancelled",
+            "unfinished when the comparison was resolved",
+        )
+        for c in attempts
+    )
+    return {
+        "attempts": len(attempts),
+        "failures": failures,
+        "failure_rate": failures / len(attempts) if attempts else None,
+    }
+
+
+def _reason_counts(comparisons):
+    counts = defaultdict(int)
+    for comparison in comparisons:
+        if comparison.status == ArenaComparisonStatus.ERRORED:
+            counts[comparison.closed_reason or "legacy_unknown"] += 1
+    return counts
+
+
 def _mean(values) -> float | None:
     values = [v for v in values if v is not None]
     return sum(values) / len(values) if values else None
@@ -62,7 +101,9 @@ def _rate_block(wins: int, total: int, threshold: int) -> dict:
         "win_rate": wins / total if total else None,
         "ci_low": low if total else None,
         "ci_high": high if total else None,
-        "indicative": total < threshold,
+        "sample_sufficient": total >= threshold,
+        "evidence_sufficient": total >= threshold and (low > 0.5 or high < 0.5),
+        "indicative": total < threshold or low <= 0.5 <= high,
     }
 
 
@@ -70,39 +111,30 @@ def build_results(  # pylint: disable=too-many-locals
     experiment: models.ArenaExperiment, include_seed: bool = True
 ) -> dict:
     """Compute every number the results template renders for one experiment."""
-    comparisons = list(experiment.comparisons.all())
+    comparisons = list(
+        experiment.comparisons.defer(
+            "champion_payload",
+            "challenger_payload",
+            "input_snapshot",
+        )
+    )
     has_seed = any(c.is_seed for c in comparisons)
     if not include_seed:
         comparisons = [c for c in comparisons if not c.is_seed]
-
-    challenger_prices = {
-        c.model_hrid: (c.input_price_eur_per_mtok, c.output_price_eur_per_mtok)
-        for c in experiment.challengers.all()
-    }
-    champion_prices = (
-        experiment.champion_input_price_eur_per_mtok,
-        experiment.champion_output_price_eur_per_mtok,
-    )
+    challenger_hrids = set(experiment.challengers.values_list("model_hrid", flat=True))
     threshold = experiment.min_votes_for_conclusion
 
     by_status = defaultdict(int)
-    total_cost = Decimal(0)
+    costs = []
     for comparison in comparisons:
         by_status[comparison.status] += 1
-        total_cost += answer_cost_eur(
-            comparison.champion_prompt_tokens,
-            comparison.champion_completion_tokens,
-            *champion_prices,
-        )
-        total_cost += answer_cost_eur(
-            comparison.challenger_prompt_tokens,
-            comparison.challenger_completion_tokens,
-            *challenger_prices.get(comparison.challenger_model_hrid, (0, 0)),
-        )
+        for role in (ArenaRole.CHAMPION, ArenaRole.CHALLENGER):
+            if getattr(comparison, f"{role}_prompt_tokens") is not None:
+                costs.append(recorded_answer_cost(comparison, role))
 
     voted = [c for c in comparisons if c.status == ArenaComparisonStatus.VOTED]
-    closed = voted + [c for c in comparisons if c.status == ArenaComparisonStatus.ABANDONED]
-
+    closed = [c for c in comparisons if c.status != ArenaComparisonStatus.PENDING]
+    known_costs = [cost for cost in costs if cost is not None]
     header = {
         "total": len(comparisons),
         "voted": len(voted),
@@ -110,8 +142,12 @@ def build_results(  # pylint: disable=too-many-locals
         "abandoned": by_status[ArenaComparisonStatus.ABANDONED],
         "errored": by_status[ArenaComparisonStatus.ERRORED],
         "pending": by_status[ArenaComparisonStatus.PENDING],
-        "vote_rate": len(voted) / len(closed) if closed else None,
-        "total_cost_eur": total_cost,
+        "vote_rate": len(voted) / len(comparisons) if comparisons else None,
+        "closed_vote_rate": len(voted) / len(closed) if closed else None,
+        "closed": len(closed),
+        "total_cost_eur": sum(known_costs, Decimal(0)) if known_costs else None,
+        "unpriced_answers": len(costs) - len(known_costs),
+        "failure_reasons": dict(_reason_counts(comparisons)),
         "refused_draws": get_refused_draws(experiment.pk),
         "has_seed": has_seed,
         "include_seed": include_seed,
@@ -120,7 +156,7 @@ def build_results(  # pylint: disable=too-many-locals
 
     # Challenger table, sorted by win rate: the scoreboard.
     hrids = sorted(
-        set(challenger_prices) | {c.challenger_model_hrid for c in comparisons},
+        challenger_hrids | {c.challenger_model_hrid for c in comparisons},
     )
     challengers = []
     for hrid in hrids:
@@ -128,16 +164,13 @@ def build_results(  # pylint: disable=too-many-locals
         votes = [c for c in rows if c.status == ArenaComparisonStatus.VOTED]
         decisive = [c for c in votes if _is_decisive(c)]
         wins = sum(1 for c in decisive if c.winner == ArenaRole.CHALLENGER)
-        prices = challenger_prices.get(hrid, (0, 0))
         challenger_costs = [
-            answer_cost_eur(c.challenger_prompt_tokens, c.challenger_completion_tokens, *prices)
+            recorded_answer_cost(c, ArenaRole.CHALLENGER)
             for c in rows
             if c.challenger_prompt_tokens is not None
         ]
         champion_costs = [
-            answer_cost_eur(
-                c.champion_prompt_tokens, c.champion_completion_tokens, *champion_prices
-            )
+            recorded_answer_cost(c, ArenaRole.CHAMPION)
             for c in rows
             if c.champion_prompt_tokens is not None
         ]
@@ -149,6 +182,7 @@ def build_results(  # pylint: disable=too-many-locals
                 **_rate_block(wins, len(decisive), threshold),
                 **_draw_counts(votes),
                 "comparisons": len(rows),
+                **_failure_block(rows, ArenaRole.CHALLENGER),
                 "abandoned": sum(1 for c in rows if c.status == ArenaComparisonStatus.ABANDONED),
                 "errored": sum(1 for c in rows if c.status == ArenaComparisonStatus.ERRORED),
                 "mean_challenger_cost_eur": mean_challenger_cost,
@@ -178,12 +212,13 @@ def build_results(  # pylint: disable=too-many-locals
     decisive_votes = [c for c in voted if _is_decisive(c)]
     champion_wins = sum(1 for c in decisive_votes if c.winner == ArenaRole.CHAMPION)
     champion_costs = [
-        answer_cost_eur(c.champion_prompt_tokens, c.champion_completion_tokens, *champion_prices)
+        recorded_answer_cost(c, ArenaRole.CHAMPION)
         for c in comparisons
         if c.champion_prompt_tokens is not None
     ]
     champion = {
         "model_hrid": experiment.champion_model_hrid,
+        **_failure_block(comparisons, ArenaRole.CHAMPION),
         **_rate_block(champion_wins, len(decisive_votes), threshold),
         **_draw_counts(voted),
         "comparisons": len(comparisons),

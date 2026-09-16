@@ -10,6 +10,8 @@ from django.utils import timezone
 import pytest
 import respx
 from freezegun import freeze_time
+from pydantic_ai.messages import ToolReturnPart
+from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from rest_framework import status
 
 from core.factories import UserFactory
@@ -473,3 +475,166 @@ def test_normal_turn_resolves_pending_comparison_first(
     conversation.refresh_from_db()
     # Champion answer from the arena turn, then the normal turn.
     assert [m.role for m in conversation.messages] == ["user", "assistant", "user", "assistant"]
+
+
+@freeze_time(FROZEN)
+@respx.mock
+def test_champion_first_and_changed_candidate_input_use_draw_snapshot(
+    api_client, experiment, mock_openai_stream_multi_calls, hello_conversation_data
+):
+    """Sequential streams get identical history, question and search settings."""
+    conversation = ChatConversationFactory(owner__language="en-us")
+    api_client.force_login(conversation.owner)
+    message = hello_conversation_data["messages"][-1]
+    draw = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+        {"message": message, "force_web_search": False},
+        format="json",
+    ).json()
+    comparison = ArenaComparison.objects.get(pk=draw["comparison_id"])
+    base = f"/api/v1.0/chats/{conversation.pk}/conversation/?arena_comparison={comparison.pk}"
+    _drain(
+        api_client.post(
+            f"{base}&arena_side={comparison.champion_side}", hello_conversation_data, format="json"
+        )
+    )
+    changed = {"messages": [_ui_message("different-id", "user", "A different question")]}
+    _drain(
+        api_client.post(
+            f"{base}&arena_side={comparison.challenger_side}&force_web_search=true",
+            changed,
+            format="json",
+        )
+    )
+    bodies = [json.loads(call.request.content) for call in mock_openai_stream_multi_calls.calls]
+    assert len(bodies) == 2
+    assert bodies[0]["messages"] == bodies[1]["messages"]
+    assert "A different question" not in str(bodies)
+    assert sum(m["role"] == "user" for m in bodies[1]["messages"]) == 1
+
+
+@freeze_time(FROZEN)
+@respx.mock
+def test_duplicate_request_is_rejected_before_first_stream_is_consumed(
+    api_client, experiment, mock_openai_stream_multi_calls, hello_conversation_data
+):
+    """An unfinished candidate is already claimed before a 200 response is returned."""
+    conversation = ChatConversationFactory(owner__language="en-us")
+    api_client.force_login(conversation.owner)
+    draw = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/arena/draw/", {}, format="json"
+    ).json()
+    url = (
+        f"/api/v1.0/chats/{conversation.pk}/conversation/"
+        f"?arena_comparison={draw['comparison_id']}&arena_side=left"
+    )
+    first = api_client.post(url, hello_conversation_data, format="json")
+    duplicate = api_client.post(url, hello_conversation_data, format="json")
+    assert first.status_code == 200
+    assert duplicate.status_code == 409
+    _drain(first)
+    assert len(mock_openai_stream_multi_calls.calls) == 1
+
+
+def test_restored_self_documentation_is_anonymized(api_client, experiment):
+    """Legacy tool outputs are redacted on restore, not just in new inference."""
+    conversation = ChatConversationFactory(messages=[])
+    api_client.force_login(conversation.owner)
+    payload = _payload("a1", "Answer")
+    payload["output_ui_message"]["parts"].append(
+        {
+            "type": "tool-self_documentation",
+            "toolCallId": "t1",
+            "state": "output-available",
+            "input": {},
+            "output": {"runtime": {"model": {"name": "secret-provider-model"}}},
+        }
+    )
+    ArenaComparisonFactory(
+        conversation=conversation,
+        experiment=experiment,
+        champion_finished_at=timezone.now(),
+        champion_payload=payload,
+        challenger_finished_at=timezone.now(),
+        challenger_payload=payload,
+    )
+    body = api_client.get(f"/api/v1.0/chats/{conversation.pk}/").json()
+    assert body["pending_arena_comparison"]["restorable"]
+    assert "secret-provider-model" not in json.dumps(body)
+
+
+def test_delete_endpoint_scrubs_arena_records(api_client, experiment):
+    conversation = ChatConversationFactory()
+    api_client.force_login(conversation.owner)
+    comparison = ArenaComparisonFactory(
+        conversation=conversation,
+        experiment=experiment,
+        champion_payload=_payload("a1", "Private"),
+        input_snapshot={"prompt": "Private"},
+    )
+    response = api_client.delete(f"/api/v1.0/chats/{conversation.pk}/")
+    assert response.status_code == 204
+    comparison.refresh_from_db()
+    assert comparison.user_id is None and comparison.conversation_id is None
+    assert comparison.champion_payload is None and comparison.input_snapshot is None
+
+
+def test_stop_endpoint_closes_comparison_before_a_late_result(api_client, experiment):
+    conversation = ChatConversationFactory()
+    api_client.force_login(conversation.owner)
+    comparison = ArenaComparisonFactory(conversation=conversation, experiment=experiment)
+    response = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/stop-streaming/", {}, format="json"
+    )
+    assert response.status_code == 200
+    arena.record_side_result(
+        comparison, ArenaRole.CHAMPION, payload=_payload("late", "Late answer")
+    )
+    comparison.refresh_from_db()
+    conversation.refresh_from_db()
+    assert comparison.status == ArenaComparisonStatus.ERRORED
+    assert comparison.closed_reason == "cancelled"
+    assert comparison.champion_payload is None
+    assert conversation.messages == []
+
+
+def test_self_documentation_tool_is_blind_in_live_stream_and_saved_payload(
+    api_client, experiment, mock_ai_agent_service, hello_conversation_data
+):
+    """Exercise the real registered tool and its SDK events through both candidates."""
+
+    seen = []
+
+    async def provider(messages, _info):
+        returns = [p for m in messages for p in m.parts if isinstance(p, ToolReturnPart)]
+        if not returns:
+            yield {0: DeltaToolCall(name="self_documentation", json_args="{}", tool_call_id="doc")}
+        else:
+            seen.append(returns[-1].content)
+            yield "I am an AI assistant."
+
+    conversation = ChatConversationFactory(owner__language="en-us")
+    api_client.force_login(conversation.owner)
+    draw = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/arena/draw/", {}, format="json"
+    ).json()
+    comparison = ArenaComparison.objects.get(pk=draw["comparison_id"])
+    with mock_ai_agent_service(FunctionModel(stream_function=provider)):
+        for side in (comparison.champion_side, comparison.challenger_side):
+            response = api_client.post(
+                f"/api/v1.0/chats/{conversation.pk}/conversation/"
+                f"?arena_comparison={comparison.pk}&arena_side={side}",
+                hello_conversation_data,
+                format="json",
+            )
+            assert response.status_code == 200
+            stream = _drain(response).decode()
+            assert "self_documentation" in stream
+            for identity in ("main-model", "challenger-model", "provider_hrid", "albert"):
+                assert identity not in stream
+    comparison.refresh_from_db()
+    assert len(seen) == 2 and seen[0] == seen[1]
+    for side in ("left", "right"):
+        payload = comparison.payload_for_side(side)
+        assert payload is not None
+        assert "provider_hrid" not in json.dumps(payload)

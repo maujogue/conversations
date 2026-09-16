@@ -171,6 +171,7 @@ class ChatConversation(BaseModel):
         blank=True,
         help_text="Agent usage for the chat conversation, provided by OpenAI API",
     )
+    arena_version = models.PositiveIntegerField(default=0)
 
     collection_id = models.CharField(
         blank=True,
@@ -596,6 +597,12 @@ class ArenaComparison(BaseModel):
     drawn_at = models.DateTimeField(default=timezone.now)
     voted_at = models.DateTimeField(null=True, blank=True)
     time_to_vote_ms = models.PositiveIntegerField(null=True, blank=True)
+    conversation_version = models.PositiveIntegerField(default=0)
+    input_snapshot = models.JSONField(null=True, blank=True)
+    price_snapshot = models.JSONField(default=dict, blank=True)
+    closed_reason = models.CharField(max_length=30, blank=True, default="")
+    champion_started_at = models.DateTimeField(null=True, blank=True)
+    challenger_started_at = models.DateTimeField(null=True, blank=True)
 
     champion_prompt_tokens = models.PositiveIntegerField(null=True, blank=True)
     champion_completion_tokens = models.PositiveIntegerField(null=True, blank=True)

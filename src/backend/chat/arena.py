@@ -10,6 +10,8 @@ Model names are never shown to the user. See ``docs/arena-mvp-spec.md``.
 
 import logging
 import random
+from contextlib import contextmanager
+from copy import deepcopy
 from datetime import timedelta
 from typing import Iterable
 
@@ -32,6 +34,7 @@ from chat.enums import (
 )
 from chat.model_health import get_status_for_hrid
 from chat.model_routing import resolve_effective_model_hrid
+from chat.tools.self_documentation import anonymize_arena_documentation
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +174,7 @@ def _turn_index(conversation: models.ChatConversation) -> int:
     return sum(1 for message in conversation.messages if message.role == "user") + 1
 
 
+@transaction.atomic
 def draw_comparison(  # noqa: PLR0911  # pylint: disable=too-many-return-statements
     *,
     conversation: models.ChatConversation,
@@ -190,6 +194,8 @@ def draw_comparison(  # noqa: PLR0911  # pylint: disable=too-many-return-stateme
     if experiment is None:
         return None
 
+    # All turn transitions lock the conversation before the comparison.
+    conversation = models.ChatConversation.objects.select_for_update().get(pk=conversation.pk)
     resolve_pending(conversation)
     _pin_conversation_to_champion(conversation)
 
@@ -220,6 +226,15 @@ def draw_comparison(  # noqa: PLR0911  # pylint: disable=too-many-return-stateme
         champion_model_hrid=experiment.champion_model_hrid,
         challenger_model_hrid=challenger_hrid,
         champion_side=champion_side,
+        conversation_version=conversation.arena_version,
+        input_snapshot={
+            "messages": [m.model_dump(mode="json") for m in conversation.messages],
+            "pydantic_messages": conversation.pydantic_messages,
+            "history_summary": conversation.history_summary,
+            "history_summary_checkpoint": conversation.history_summary_checkpoint,
+            "request_ui_message": last_message.model_dump(mode="json") if last_message else None,
+            "force_web_search": force_web_search,
+        },
     )
     logger.info(
         "Arena draw on conversation %s: %s vs %s (champion on the %s)",
@@ -238,6 +253,88 @@ def get_pending_comparison(conversation) -> models.ArenaComparison | None:
     ).first()
 
 
+@contextmanager
+def locked_comparison(comparison):
+    """Serialize commits, cancellation, votes and deletion in a fixed lock order."""
+    with transaction.atomic():
+        conversation = (
+            models.ChatConversation.objects.select_for_update()
+            .filter(pk=comparison.conversation_id)
+            .first()
+        )
+        current = models.ArenaComparison.objects.select_for_update().get(pk=comparison.pk)
+        current.conversation = conversation if current.conversation_id else None
+        yield current
+
+
+def _version_matches(comparison) -> bool:
+    return (
+        comparison.conversation is not None
+        and comparison.conversation.arena_version == comparison.conversation_version
+    )
+
+
+def candidate_prices(comparison, role) -> dict:
+    """Immutable EUR/token pricing revision captured when inference is claimed."""
+    if role == ArenaRole.CHAMPION:
+        experiment = models.ArenaExperiment.objects.get(pk=comparison.experiment_id)
+        prices = (
+            experiment.champion_input_price_eur_per_mtok,
+            experiment.champion_output_price_eur_per_mtok,
+        )
+    else:
+        challenger = comparison.experiment.challengers.filter(
+            model_hrid=comparison.challenger_model_hrid
+        ).first()
+        if challenger is None:
+            return {}
+        prices = (challenger.input_price_eur_per_mtok, challenger.output_price_eur_per_mtok)
+    return {
+        "input": str(prices[0]),
+        "output": str(prices[1]),
+        "currency": "EUR",
+        "unit": "million_tokens",
+        "captured_at": timezone.now().isoformat(),
+    }
+
+
+def claim_candidate(comparison, role, message):
+    """Only one request may start each candidate; both consume the same input."""
+    with locked_comparison(comparison) as current:
+        if current.status != ArenaComparisonStatus.PENDING or not _version_matches(current):
+            raise ArenaConflict("arena_comparison_closed")
+        if getattr(current, f"{role}_started_at") or current.side_finished(role):
+            raise ArenaConflict("arena_side_already_started")
+        snapshot = current.input_snapshot
+        if snapshot is None:
+            # Comparisons predating input snapshots cannot safely be resumed.
+            raise ArenaConflict("arena_comparison_has_no_snapshot")
+        if snapshot["request_ui_message"] is None:
+            snapshot["request_ui_message"] = message.model_dump(mode="json")
+        setattr(current, f"{role}_started_at", timezone.now())
+        current.price_snapshot[role] = candidate_prices(current, role)
+        current.save(
+            update_fields=[
+                f"{role}_started_at",
+                "input_snapshot",
+                "price_snapshot",
+                "updated_at",
+            ]
+        )
+        return current
+
+
+def snapshot_conversation(conversation, comparison):
+    """Build an in-memory conversation for inference without reading mutable history."""
+    snapshot = comparison.input_snapshot
+    conversation = deepcopy(conversation)
+    conversation.messages = [UIMessage.model_validate(m) for m in snapshot["messages"]]
+    conversation.pydantic_messages = deepcopy(snapshot["pydantic_messages"])
+    conversation.history_summary = snapshot["history_summary"]
+    conversation.history_summary_checkpoint = snapshot["history_summary_checkpoint"]
+    return conversation
+
+
 def build_turn_payload(
     *,
     request_ui_message: UIMessage | None,
@@ -250,8 +347,10 @@ def build_turn_payload(
         "request_ui_message": (
             request_ui_message.model_dump(mode="json") if request_ui_message else None
         ),
-        "output_ui_message": output_ui_message.model_dump(mode="json"),
-        "pydantic_messages": pydantic_messages,
+        "output_ui_message": anonymize_arena_documentation(
+            output_ui_message.model_dump(mode="json")
+        ),
+        "pydantic_messages": anonymize_arena_documentation(pydantic_messages),
         "usage": {
             "promptTokens": int(usage.get("promptTokens", 0) or 0),
             "completionTokens": int(usage.get("completionTokens", 0) or 0),
@@ -279,7 +378,7 @@ def commit_payload(conversation: models.ChatConversation, payload: dict) -> None
     for key in ("promptTokens", "completionTokens", "co2_impact"):
         usage[key] = usage.get(key, 0) + payload["usage"].get(key, 0)
     conversation.agent_usage = usage
-    conversation.save()
+    conversation.save(update_fields=["messages", "pydantic_messages", "agent_usage", "updated_at"])
 
 
 def record_side_result(  # noqa: PLR0913  # pylint: disable=too-many-arguments
@@ -296,18 +395,35 @@ def record_side_result(  # noqa: PLR0913  # pylint: disable=too-many-arguments
     error: str = "",
     web_search_used: bool = False,
 ) -> None:
-    """Store what one model produced for the comparison (answer, metrics or error)."""
-    values = {
-        "payload": payload,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "co2_impact": co2_impact,
-        "latency_ms": latency_ms,
-        "first_token_ms": first_token_ms,
-        "trace_id": trace_id or "",
-        "error": error or "",
-        "finished_at": timezone.now(),
-    }
+    """Commit a result at most once, while its comparison and turn are current."""
+    with locked_comparison(comparison) as current:
+        if (
+            current.status != ArenaComparisonStatus.PENDING
+            or not _version_matches(current)
+            or current.side_finished(role)
+        ):
+            return
+        _store_side_result(
+            current,
+            role,
+            payload=payload,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            co2_impact=co2_impact,
+            latency_ms=latency_ms,
+            first_token_ms=first_token_ms,
+            trace_id=trace_id,
+            error=error,
+            web_search_used=web_search_used,
+        )
+    comparison.refresh_from_db()
+
+
+def _store_side_result(comparison, role, *, web_search_used, **values):
+    """Persist under the conversation and comparison locks held by the caller."""
+    payload = values["payload"]
+    error = values["error"]
+    values["finished_at"] = timezone.now()
     update_fields = []
     for name, value in values.items():
         field = f"{role}_{name}"
@@ -356,47 +472,74 @@ def replace_last_turn(conversation: models.ChatConversation, old: dict, new: dic
     for key in ("promptTokens", "completionTokens", "co2_impact"):
         usage[key] = usage.get(key, 0) - old["usage"].get(key, 0) + new["usage"].get(key, 0)
     conversation.agent_usage = usage
-    conversation.save()
+    conversation.save(update_fields=["messages", "pydantic_messages", "agent_usage", "updated_at"])
 
 
 def _ensure_champion_committed(comparison: models.ArenaComparison) -> None:
     """Write the champion answer if ``record_side_result`` could not (no conversation then)."""
-    if comparison.champion_committed or comparison.conversation is None:
+    if comparison.champion_committed or not _version_matches(comparison):
         return
     if comparison.side_succeeded(ArenaRole.CHAMPION):
         commit_payload(comparison.conversation, comparison.champion_payload)
         comparison.champion_committed = True
 
 
-def _close_without_vote(comparison: models.ArenaComparison) -> None:
+def _close_without_vote(comparison: models.ArenaComparison, reason: str | None = None) -> None:
     """Keep the champion answer if it exists and close the comparison."""
     conversation = comparison.conversation
-    if comparison.side_succeeded(ArenaRole.CHAMPION) and conversation is not None:
+    failed = bool(comparison.champion_error or comparison.challenger_error)
+    comparison.closed_reason = "candidate_failed" if failed else "user_abandoned"
+    if not _version_matches(comparison):
+        comparison.status = ArenaComparisonStatus.ERRORED
+        comparison.closed_reason = "superseded"
+    elif comparison.side_succeeded(ArenaRole.CHAMPION) and conversation is not None:
         _ensure_champion_committed(comparison)
-        comparison.status = ArenaComparisonStatus.ABANDONED
+        comparison.status = (
+            ArenaComparisonStatus.ERRORED if failed else ArenaComparisonStatus.ABANDONED
+        )
     else:
         comparison.status = ArenaComparisonStatus.ERRORED
         if not comparison.champion_error and not comparison.side_finished(ArenaRole.CHAMPION):
             comparison.champion_error = "unfinished when the comparison was resolved"
-    comparison.save(update_fields=["status", "champion_error", "champion_committed", "updated_at"])
+            if not failed:
+                comparison.closed_reason = "cancelled"
+    if reason == "cancelled":
+        comparison.status = ArenaComparisonStatus.ERRORED
+        comparison.closed_reason = reason
+    comparison.save(
+        update_fields=[
+            "status",
+            "closed_reason",
+            "champion_error",
+            "champion_committed",
+            "updated_at",
+        ]
+    )
 
 
-def resolve_pending(conversation: models.ChatConversation) -> models.ArenaComparison | None:
+def resolve_pending(
+    conversation: models.ChatConversation, *, reason: str | None = None
+) -> models.ArenaComparison | None:
     """Close a comparison the user walked away from, keeping the champion's answer.
 
     Called before any new turn or draw on the conversation, and by the vote
     endpoint when the client abandons explicitly. Returns the resolved comparison.
     """
     with transaction.atomic():
+        current_conversation = models.ChatConversation.objects.select_for_update().get(
+            pk=conversation.pk
+        )
         pending = (
             models.ArenaComparison.objects.select_for_update()
             .filter(conversation=conversation, status=ArenaComparisonStatus.PENDING)
             .first()
         )
-        if pending is None:
-            return None
-        pending.conversation = conversation
-        _close_without_vote(pending)
+        if pending is not None:
+            pending.conversation = current_conversation
+            _close_without_vote(pending, reason=reason)
+        current_conversation.arena_version += 1
+        current_conversation.save(update_fields=["arena_version"])
+        conversation.refresh_from_db()
         return pending
 
 
@@ -412,13 +555,15 @@ def vote(comparison: models.ArenaComparison, side: str | None) -> models.ArenaCo
     comparison and keeps the champion answer. Raises ``ArenaConflict`` when the
     comparison is not pending or a side has not finished streaming.
     """
-    with transaction.atomic():
-        comparison = models.ArenaComparison.objects.select_for_update().get(pk=comparison.pk)
+    with locked_comparison(comparison) as current:
+        comparison = current
         if comparison.status != ArenaComparisonStatus.PENDING:
             raise ArenaConflict("This comparison is already closed.")
         if side is None:
             _close_without_vote(comparison)
             return comparison
+        if not _version_matches(comparison):
+            raise ArenaConflict("The conversation has moved to another turn.")
         if not (
             comparison.side_finished(ArenaRole.CHAMPION)
             and comparison.side_finished(ArenaRole.CHALLENGER)
@@ -457,9 +602,11 @@ def vote(comparison: models.ArenaComparison, side: str | None) -> models.ArenaCo
         else:
             # One answer never arrived: the user did not really compare anything.
             comparison.status = ArenaComparisonStatus.ERRORED
+            comparison.closed_reason = "candidate_failed"
         comparison.save(
             update_fields=[
                 "status",
+                "closed_reason",
                 "winner",
                 "voted_at",
                 "time_to_vote_ms",
@@ -485,7 +632,9 @@ def _vote_draw(comparison: models.ArenaComparison, outcome: str) -> models.Arena
     _ensure_champion_committed(comparison)
     now = timezone.now()
     comparison.time_to_vote_ms = int(
-        (now - max(comparison.champion_finished_at, comparison.challenger_finished_at)).total_seconds()
+        (
+            now - max(comparison.champion_finished_at, comparison.challenger_finished_at)
+        ).total_seconds()
         * 1000
     )
     comparison.voted_at = now

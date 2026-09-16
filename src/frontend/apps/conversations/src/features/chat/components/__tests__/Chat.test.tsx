@@ -56,8 +56,11 @@ vi.mock('rehype-katex', () => ({ default: () => {} }));
 vi.mock('remark-gfm', () => ({ default: () => {} }));
 vi.mock('remark-math', () => ({ default: () => {} }));
 
+const arenaFeature = vi.hoisted(() => ({ enabled: false }));
+
 vi.mock('@/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/core')>()),
+  useFeatureEnabled: (key: string) => key === 'arena' && arenaFeature.enabled,
   useConfig: () => ({ data: {} }),
 }));
 vi.mock('@/core/config', async (importOriginal) => ({
@@ -161,6 +164,7 @@ describe('Chat message ownership', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    arenaFeature.enabled = false;
     usePendingChatStore.setState({ input: '', files: null });
     fetchAPIMock.mockImplementation((url: string) => {
       if (url.startsWith('chat-cooldown')) {
@@ -320,6 +324,136 @@ describe('Chat message ownership', () => {
         'Assistant IA replied: An answer.',
       ]),
     );
+  });
+
+  it('keeps a new comparison votable when the delayed initialization sees it running', async () => {
+    arenaFeature.enabled = true;
+    usePendingChatStore.setState({ input: 'Carried arena question' });
+    let resolveFetch: (value: unknown) => void = () => {};
+    getConversationMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+    fetchAPIMock.mockImplementation((url: string) => {
+      if (url.includes('/arena/draw/')) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({ arena: true, comparison_id: 'running' }),
+        });
+      }
+      if (url.includes('/vote/')) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              messages: HISTORY,
+              pending_arena_comparison: null,
+            }),
+        });
+      }
+      if (url.startsWith('chat-cooldown')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ cooldown_seconds: 0 }),
+        });
+      }
+      return Promise.resolve({ ok: true, body: streamOf(ANSWER_STREAM) });
+    });
+    renderChat();
+    await waitFor(() => expect(chatPostCount(fetchAPIMock)).toBe(2));
+    await act(async () => {
+      resolveFetch({
+        messages: [],
+        pending_arena_comparison: {
+          id: 'running',
+          sides_finished: { left: false, right: false },
+          restorable: false,
+          answers: null,
+        },
+      });
+    });
+    const button = await screen.findByRole('button', {
+      name: 'I prefer answer A',
+    });
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(
+      fetchAPIMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/vote/'),
+      ),
+    ).toHaveLength(0);
+    await userEvent.click(button);
+    await waitFor(() =>
+      expect(
+        fetchAPIMock.mock.calls.filter((call) =>
+          String(call[0]).includes('/vote/'),
+        ),
+      ).toHaveLength(1),
+    );
+    const vote = fetchAPIMock.mock.calls.find((call) =>
+      String(call[0]).includes('/vote/'),
+    );
+    expect(JSON.parse(vote?.[1].body as string)).toEqual({ side: 'left' });
+    const draw = fetchAPIMock.mock.calls.find((call) =>
+      String(call[0]).includes('/arena/draw/'),
+    );
+    expect(JSON.parse(draw?.[1].body as string)).toMatchObject({
+      message: {
+        role: 'user',
+        parts: [{ type: 'text', text: 'Carried arena question' }],
+      },
+    });
+  });
+
+  it('never abandons an unfinished comparison returned by a delayed handoff fetch', async () => {
+    usePendingChatStore.setState({ input: 'Carried question' });
+    let resolveFetch: (value: unknown) => void = () => {};
+    getConversationMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+    renderChat();
+    await waitFor(() => expect(getConversationMock).toHaveBeenCalled());
+    await act(async () => {
+      resolveFetch({
+        messages: [],
+        pending_arena_comparison: {
+          id: 'running-comparison',
+          sides_finished: { left: false, right: false },
+          restorable: false,
+          answers: null,
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(messageTexts()).toContain('You said: Carried question'),
+    );
+    expect(
+      fetchAPIMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/vote/'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("does not close another tab's unfinished comparison during initialization", async () => {
+    getConversationMock.mockResolvedValue({
+      messages: HISTORY,
+      pending_arena_comparison: {
+        id: 'other-tab',
+        sides_finished: { left: true, right: false },
+        restorable: false,
+        answers: null,
+      },
+    });
+    renderChat();
+    await screen.findByText('An older answer');
+    expect(
+      fetchAPIMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/vote/'),
+      ),
+    ).toHaveLength(0);
   });
 
   it('puts an unvoted arena choice back on screen instead of resolving it', async () => {

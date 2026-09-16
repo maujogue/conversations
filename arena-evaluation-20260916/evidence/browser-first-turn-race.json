@@ -1,0 +1,57 @@
+{
+  "description": "Synthetic network ordering: delay chat-detail GET until draw completes; model response slow. No source modified.",
+  "url": "http://127.0.0.1:23000/chat/ea4ec3aa-39f4-4dd5-a91c-22ab050c54da",
+  "clicked": true,
+  "events": [
+    {
+      "ms": 207,
+      "url": "http://127.0.0.1:23000/src/features/chat/components/arena/ArenaIntro.tsx",
+      "status": 200,
+      "method": "GET",
+      "body": null
+    },
+    {
+      "ms": 208,
+      "url": "http://127.0.0.1:23000/src/features/chat/components/arena/ArenaTurn.tsx",
+      "status": 200,
+      "method": "GET",
+      "body": null
+    },
+    {
+      "ms": 1523,
+      "url": "http://127.0.0.1:28071/api/v1.0/chats/ea4ec3aa-39f4-4dd5-a91c-22ab050c54da/arena/draw/",
+      "status": 200,
+      "method": "POST",
+      "body": "{\"force_web_search\":false}"
+    },
+    {
+      "ms": 1580,
+      "url": "http://127.0.0.1:28071/api/v1.0/chats/ea4ec3aa-39f4-4dd5-a91c-22ab050c54da/conversation/?arena_comparison=b996802a-a76b-46cf-8e79-58b323c000f1&arena_side=left",
+      "status": 200,
+      "method": "POST",
+      "body": "{\"id\":\"b996802a-a76b-46cf-8e79-58b323c000f1-left\",\"messages\":[{\"parts\":[{\"type\":\"text\",\"text\":\"QA première conversation. Réponds brièvement. [SLOW]\"}],\"id\":\"H9SZ54ua8fPJrAfG\",\"role\":\"user\"}],\"trigger\":\"submit-message\"}"
+    },
+    {
+      "ms": 1581,
+      "url": "http://127.0.0.1:28071/api/v1.0/chats/ea4ec3aa-39f4-4dd5-a91c-22ab050c54da/conversation/?arena_comparison=b996802a-a76b-46cf-8e79-58b323c000f1&arena_side=right",
+      "status": 200,
+      "method": "POST",
+      "body": "{\"id\":\"b996802a-a76b-46cf-8e79-58b323c000f1-right\",\"messages\":[{\"parts\":[{\"type\":\"text\",\"text\":\"QA première conversation. Réponds brièvement. [SLOW]\"}],\"id\":\"MbE7kybjgsnhuehC\",\"role\":\"user\"}],\"trigger\":\"submit-message\"}"
+    },
+    {
+      "ms": 1624,
+      "url": "http://127.0.0.1:28071/api/v1.0/chats/ea4ec3aa-39f4-4dd5-a91c-22ab050c54da/arena/b996802a-a76b-46cf-8e79-58b323c000f1/vote/",
+      "status": 200,
+      "method": "POST",
+      "body": "{\"side\":null}"
+    },
+    {
+      "ms": 7498,
+      "url": "http://127.0.0.1:28071/api/v1.0/chats/ea4ec3aa-39f4-4dd5-a91c-22ab050c54da/arena/b996802a-a76b-46cf-8e79-58b323c000f1/vote/",
+      "status": 409,
+      "method": "POST",
+      "body": "{\"side\":\"left\"}"
+    }
+  ],
+  "body": "Nouvelle conversation\nsearch\nRechercher\nNouveau projet\nVOS CONVERSATIONS\nQA première conversation. Réponds brièvement. [SLOW]\nmore_horiz\nQA real API existing conversation\nmore_horiz\nCas fictif. Réécris ce message administratif en moins de 100 mots, sans ajouter de nouvelles info...\nmore_horiz\nRésume ce texte : la réunion est reportée à vendredi.\nmore_horiz\nQA identity\nmore_horiz\nQA late-result\nmore_horiz\nQA duplicate-stream\nmore_horiz\nRéponds brièvement. [FAIL_CHALLENGER]\nmore_horiz\nReformule ce mail pour un directeur : nous avons reçu votre demande et répondrons vendredi. [LONG]\nmore_horiz\nReformule ce mail pour un directeur : nous avons reçu votre demande et répondrons vendredi. [LONG]\nmore_horiz\nÉA\n\nVous avez dit :\n\nQA première conversation. Réponds brièvement. [SLOW]\n\nDeux réponses vous sont proposées. Choisissez celle que vous préférez, elle sera conservée dans la conversation.\nRéponse A\n\nAssistant IA a répondu :\n\nBonjour,\n\nMerci pour votre message. Voici une proposition structurée :\n\nObjet : Suivi de notre réunion\n\nNous vous confirmons la réception de votre demande. Notre équipe prépare les éléments nécessaires et reviendra vers vous vendredi.\n\nActions à réaliser\n\nVérifier les informations du dossier.\nPréparer une synthèse pour validation.\nTransmettre la réponse au service concerné.\n\nCordialement, Le service administratif\n\nRéponse B\n\nAssistant IA a répondu :\n\nBonjour,\n\nNous avons bien reçu votre demande. Vous recevrez notre réponse vendredi.\n\nD’ici là, nous allons :\n\nvérifier votre dossier ;\npréparer la synthèse ;\nfaire valider la réponse.\n\nCordialement, Le service administratif\n\narrow_back\nA est meilleur\nB est meilleur\narrow_forward\nPoser une question\nTransformer cette liste en points à puces\nÉcrire une description courte du produit\nTrouver les dernières actualités concernant...\nPoser une question\nattach_file\nJoindre un fichier\nlanguage\nRechercher sur le web\n🤖\nkeyboard_arrow_down\narrow_upward\nL'Assistant peut faire des erreurs. Veuillez vérifier toutes les informations importantes.\nErreur\nUne erreur s'est produite. Veuillez réessayer."
+}

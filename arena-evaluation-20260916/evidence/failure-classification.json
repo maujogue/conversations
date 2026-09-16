@@ -1,0 +1,23 @@
+[
+  {
+    "id": "4e474a12-dc93-41c7-9aeb-bd01511a85f5",
+    "conversation_id": "59f932d1-e4ff-4763-a93b-2dd785fecfbb",
+    "status": "abandoned",
+    "winner": "",
+    "champion_error": "",
+    "challenger_error": "model_busy",
+    "champion_finished_at": "2026-09-15 22:20:40.433566+00:00",
+    "challenger_finished_at": "2026-09-15 22:20:41.471564+00:00",
+    "champion_committed": true,
+    "champion_latency_ms": 284,
+    "challenger_latency_ms": 1330,
+    "champion_first_token_ms": 12,
+    "challenger_first_token_ms": null,
+    "champion_prompt_tokens": 200,
+    "champion_completion_tokens": 108,
+    "challenger_prompt_tokens": null,
+    "challenger_completion_tokens": null,
+    "champion_co2_impact": 0.0,
+    "challenger_co2_impact": null
+  }
+]

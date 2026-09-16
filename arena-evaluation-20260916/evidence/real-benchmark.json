@@ -1,0 +1,308 @@
+[
+  {
+    "model": "mistral-small-3-2-24b-instruct-2506",
+    "task": "mail",
+    "prompt": "Réécris ce brouillon en un courriel professionnel de 100 mots maximum. Ne crée aucune information. Brouillon : Bonjour Madame Martin. On a reçu votre demande de formation. Il manque votre justificatif. Merci de l’envoyer avant le 21 septembre 2026 à 17 h. Votre dossier sera étudié après réception. Aucune décision d’acceptation n’a été prise. Signer : Le service formation.",
+    "system": "Tu es un assistant pour des agents publics. Réponds en français, de manière concise et exacte. Respecte les seules informations fournies et les contraintes de la demande.",
+    "synthetic": true,
+    "http_status": 200,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 123,
+      "completion_tokens": 95,
+      "total_tokens": 218,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 1.5089186930457862e-05,
+          "max": 1.5089186930457862e-05
+        },
+        "kgCO2eq": {
+          "min": 8.355734521828845e-07,
+          "max": 8.355734521828845e-07
+        }
+      },
+      "impacts": {
+        "kWh": 1.5089186930457862e-05,
+        "kgCO2eq": 8.355734521828845e-07
+      },
+      "requests": 1
+    },
+    "answer": "Objet : Complément de dossier - Demande de formation\n\nMadame Martin,\n\nNous avons bien reçu votre demande de formation. Cependant, il manque le justificatif requis. Merci de nous l'envoyer avant le 21 septembre 2026 à 17h. Votre dossier sera examiné dès réception. Aucune décision n'a encore été prise.\n\nCordialement,\nLe service formation",
+    "reasoning_characters": 0,
+    "duration_s": 1.382,
+    "first_text_s": 0.254
+  },
+  {
+    "model": "openai/gpt-oss-120b",
+    "task": "mail",
+    "prompt": "Réécris ce brouillon en un courriel professionnel de 100 mots maximum. Ne crée aucune information. Brouillon : Bonjour Madame Martin. On a reçu votre demande de formation. Il manque votre justificatif. Merci de l’envoyer avant le 21 septembre 2026 à 17 h. Votre dossier sera étudié après réception. Aucune décision d’acceptation n’a été prise. Signer : Le service formation.",
+    "system": "Tu es un assistant pour des agents publics. Réponds en français, de manière concise et exacte. Respecte les seules informations fournies et les contraintes de la demande.",
+    "synthetic": true,
+    "http_status": 200,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 123,
+      "completion_tokens": 87,
+      "total_tokens": 210,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 0.00011385169449947867,
+          "max": 0.00011385169449947867
+        },
+        "kgCO2eq": {
+          "min": 5.7937137275015964e-06,
+          "max": 5.7937137275015964e-06
+        }
+      },
+      "impacts": {
+        "kWh": 0.00011385169449947867,
+        "kgCO2eq": 5.7937137275015964e-06
+      },
+      "requests": 1
+    },
+    "answer": "Madame Martin,\n\nNous avons bien reçu votre demande de formation. Toutefois, votre justificatif est manquant. Nous vous remercions de le transmettre au plus tard le 21 septembre 2026 à 17 h. Votre dossier sera étudié dès réception. Aucune décision d’acceptation n’a encore été prise.\n\nCordialement,  \nLe service formation",
+    "reasoning_characters": 0,
+    "duration_s": 1.535,
+    "first_text_s": 1.243
+  },
+  {
+    "model": "ministral-3-8b-instruct-2512",
+    "task": "mail",
+    "prompt": "Réécris ce brouillon en un courriel professionnel de 100 mots maximum. Ne crée aucune information. Brouillon : Bonjour Madame Martin. On a reçu votre demande de formation. Il manque votre justificatif. Merci de l’envoyer avant le 21 septembre 2026 à 17 h. Votre dossier sera étudié après réception. Aucune décision d’acceptation n’a été prise. Signer : Le service formation.",
+    "system": "Tu es un assistant pour des agents publics. Réponds en français, de manière concise et exacte. Respecte les seules informations fournies et les contraintes de la demande.",
+    "synthetic": true,
+    "http_status": 200,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 123,
+      "completion_tokens": 110,
+      "total_tokens": 233,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 1.2857995830874082e-05,
+          "max": 1.2857995830874082e-05
+        },
+        "kgCO2eq": {
+          "min": 6.14823252441494e-07,
+          "max": 6.14823252441494e-07
+        }
+      },
+      "impacts": {
+        "kWh": 1.2857995830874082e-05,
+        "kgCO2eq": 6.14823252441494e-07
+      },
+      "requests": 1
+    },
+    "answer": "**Objet : Complément de dossier – Formation**\n\nBonjour Madame Martin,\n\nNous avons bien pris note de votre demande de formation. Pour finaliser votre dossier, merci de nous transmettre votre justificatif **avant le 21 septembre 2026 à 17 h** (format PDF, par retour).\n\nVotre dossier sera examiné dès réception. Aucune décision n’est encore prise.\n\nCordialement,\n**Le service formation**",
+    "reasoning_characters": 0,
+    "duration_s": 0.437,
+    "first_text_s": 0.126
+  },
+  {
+    "model": "openai/gpt-oss-120b",
+    "task": "actions",
+    "prompt": "À partir des notes suivantes, rends uniquement un tableau Markdown avec les colonnes Action, Responsable, Échéance, Statut. Écris « Non précisé » quand une information manque. Notes : Réunion du 14 septembre 2026. Léa doit vérifier les 18 dossiers avant le 18 septembre. Karim préparera une synthèse, mais aucune date n’a été fixée. Le responsable de la mise à jour du guide reste à désigner ; livraison prévue le 25 septembre. La formation du 22 septembre est annulée, ne la présente pas comme une action à réaliser.",
+    "system": "Tu es un assistant pour des agents publics. Réponds en français, de manière concise et exacte. Respecte les seules informations fournies et les contraintes de la demande.",
+    "synthetic": true,
+    "http_status": 200,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 156,
+      "completion_tokens": 98,
+      "total_tokens": 254,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 0.00013637395429936942,
+          "max": 0.00013637395429936942
+        },
+        "kgCO2eq": {
+          "min": 6.701892063355239e-06,
+          "max": 6.701892063355239e-06
+        }
+      },
+      "impacts": {
+        "kWh": 0.00013637395429936942,
+        "kgCO2eq": 6.701892063355239e-06
+      },
+      "requests": 1
+    },
+    "answer": "| Action                                   | Responsable | Échéance        | Statut        |\n|------------------------------------------|-------------|-----------------|---------------|\n| Vérifier les 18 dossiers                 | Léa         | 18 septembre 2026 | Non précisé   |\n| Préparer une synthèse                    | Karim       | Non précisé     | Non précisé   |\n| Mettre à jour le guide (livraison prévue) | Non précisé | 25 septembre 2026 | Non précisé   |",
+    "reasoning_characters": 0,
+    "duration_s": 1.29,
+    "first_text_s": 0.922
+  },
+  {
+    "model": "ministral-3-8b-instruct-2512",
+    "task": "actions",
+    "prompt": "À partir des notes suivantes, rends uniquement un tableau Markdown avec les colonnes Action, Responsable, Échéance, Statut. Écris « Non précisé » quand une information manque. Notes : Réunion du 14 septembre 2026. Léa doit vérifier les 18 dossiers avant le 18 septembre. Karim préparera une synthèse, mais aucune date n’a été fixée. Le responsable de la mise à jour du guide reste à désigner ; livraison prévue le 25 septembre. La formation du 22 septembre est annulée, ne la présente pas comme une action à réaliser.",
+    "system": "Tu es un assistant pour des agents publics. Réponds en français, de manière concise et exacte. Respecte les seules informations fournies et les contraintes de la demande.",
+    "synthetic": true,
+    "http_status": 200,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 156,
+      "completion_tokens": 125,
+      "total_tokens": 281,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 1.5538462112556296e-05,
+          "max": 1.5538462112556296e-05
+        },
+        "kgCO2eq": {
+          "min": 7.487354126417004e-07,
+          "max": 7.487354126417004e-07
+        }
+      },
+      "impacts": {
+        "kWh": 1.5538462112556296e-05,
+        "kgCO2eq": 7.487354126417004e-07
+      },
+      "requests": 1
+    },
+    "answer": "Voici le tableau demandé :\n\n```markdown\n| Action                          | Responsable | Échéance      | Statut     |\n|---------------------------------|-------------|---------------|------------|\n| Vérifier les 18 dossiers         | Léa         | 18/09/2026    | Non précisé|\n| Préparer une synthèse            | Karim       | Non précisé   | Non précisé|\n| Désigner le responsable mise à jour du guide | Non précisé | 25/09/2026    | Non précisé|\n```",
+    "reasoning_characters": 0,
+    "duration_s": 0.545,
+    "first_text_s": 0.13
+  },
+  {
+    "model": "mistral-small-3-2-24b-instruct-2506",
+    "task": "actions",
+    "prompt": "À partir des notes suivantes, rends uniquement un tableau Markdown avec les colonnes Action, Responsable, Échéance, Statut. Écris « Non précisé » quand une information manque. Notes : Réunion du 14 septembre 2026. Léa doit vérifier les 18 dossiers avant le 18 septembre. Karim préparera une synthèse, mais aucune date n’a été fixée. Le responsable de la mise à jour du guide reste à désigner ; livraison prévue le 25 septembre. La formation du 22 septembre est annulée, ne la présente pas comme une action à réaliser.",
+    "system": "Tu es un assistant pour des agents publics. Réponds en français, de manière concise et exacte. Respecte les seules informations fournies et les contraintes de la demande.",
+    "synthetic": true,
+    "http_status": 200,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 156,
+      "completion_tokens": 99,
+      "total_tokens": 255,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 1.7719673215673188e-05,
+          "max": 1.7719673215673188e-05
+        },
+        "kgCO2eq": {
+          "min": 9.933340267708428e-07,
+          "max": 9.933340267708428e-07
+        }
+      },
+      "impacts": {
+        "kWh": 1.7719673215673188e-05,
+        "kgCO2eq": 9.933340267708428e-07
+      },
+      "requests": 1
+    },
+    "answer": "```markdown\n| Action                     | Responsable | Échéance   | Statut       |\n|----------------------------|-------------|------------|--------------|\n| Vérifier les 18 dossiers   | Léa         | 18 septembre | Non précisé  |\n| Préparer une synthèse      | Karim       | Non précisé | Non précisé  |\n| Mise à jour du guide       | Non précisé | 25 septembre | Non précisé  |\n```",
+    "reasoning_characters": 0,
+    "duration_s": 1.571,
+    "first_text_s": 0.157
+  },
+  {
+    "model": "openai/gpt-oss-120b",
+    "task": "calculation",
+    "prompt": "Cas fictif. Une administration utilise 80 licences à 12 € par mois et par licence, pendant 12 mois. Une remise de 15 % porte uniquement sur les licences. La migration coûte 1 800 € une seule fois. Tous les montants sont hors taxes ; ne calcule pas la TVA. Calcule le coût des licences avant et après remise, le total de première année, le total de deuxième année si rien ne change, et le dépassement éventuel du budget de première année de 11 000 €. Montre les opérations, en moins de 160 mots.",
+    "system": "Tu es un assistant pour des agents publics. Réponds en français, de manière concise et exacte. Respecte les seules informations fournies et les contraintes de la demande.",
+    "synthetic": true,
+    "http_status": 200,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 155,
+      "completion_tokens": 179,
+      "total_tokens": 334,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 0.00017978204029917081,
+          "max": 0.00017978204029917081
+        },
+        "kgCO2eq": {
+          "min": 8.917284786041415e-06,
+          "max": 8.917284786041415e-06
+        }
+      },
+      "impacts": {
+        "kWh": 0.00017978204029917081,
+        "kgCO2eq": 8.917284786041415e-06
+      },
+      "requests": 1
+    },
+    "answer": "**Licences (avant remise)**  \n80 licences × 12 €/mois = 960 €/mois  \n960 €/mois × 12 mois = **11 520 €**\n\n**Remise 15 % (sur les licences)**  \n15 % × 11 520 € = 1 728 €  \n11 520 € – 1 728 € = **9 792 €** (licences après remise)\n\n**Coût migration** (une fois) = **1 800 €**\n\n**Total première année**  \nLicences + migration = 9 792 € + 1 800 € = **11 592 €**\n\n**Total deuxième année** (pas de migration) = **9 792 €**\n\n**Dépassement du budget 1ère année (11 000 €)**  \n11 592 € – 11 000 € = **+592 €** (dépassement)  \n\n*Toutes les sommes sont hors TVA.*",
+    "reasoning_characters": 0,
+    "duration_s": 1.838,
+    "first_text_s": 1.01
+  },
+  {
+    "model": "ministral-3-8b-instruct-2512",
+    "task": "calculation",
+    "prompt": "Cas fictif. Une administration utilise 80 licences à 12 € par mois et par licence, pendant 12 mois. Une remise de 15 % porte uniquement sur les licences. La migration coûte 1 800 € une seule fois. Tous les montants sont hors taxes ; ne calcule pas la TVA. Calcule le coût des licences avant et après remise, le total de première année, le total de deuxième année si rien ne change, et le dépassement éventuel du budget de première année de 11 000 €. Montre les opérations, en moins de 160 mots.",
+    "system": "Tu es un assistant pour des agents publics. Réponds en français, de manière concise et exacte. Respecte les seules informations fournies et les contraintes de la demande.",
+    "synthetic": true,
+    "http_status": 200,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 155,
+      "completion_tokens": 172,
+      "total_tokens": 327,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 1.8189631622085087e-05,
+          "max": 1.8189631622085087e-05
+        },
+        "kgCO2eq": {
+          "min": 8.959738503025994e-07,
+          "max": 8.959738503025994e-07
+        }
+      },
+      "impacts": {
+        "kWh": 1.8189631622085087e-05,
+        "kgCO2eq": 8.959738503025994e-07
+      },
+      "requests": 1
+    },
+    "answer": "**Coût des licences :**\n- **Avant remise** : 80 × 12 € = **960 €/mois** → **11 520 €/an** (12 × 960).\n- **Après remise (15 %)** : 960 € × 0,85 = **816 €/mois** → **9 792 €/an**.\n\n**Totaux :**\n- **1ère année** : 9 792 € (licences) + 1 800 € (migration) = **11 592 €** → **dépassement de 592 €** (11 592 – 11 000).\n- **2ème année** : 9 792 € (licences uniquement).",
+    "reasoning_characters": 0,
+    "duration_s": 0.756,
+    "first_text_s": 0.129
+  },
+  {
+    "model": "mistral-small-3-2-24b-instruct-2506",
+    "task": "calculation",
+    "prompt": "Cas fictif. Une administration utilise 80 licences à 12 € par mois et par licence, pendant 12 mois. Une remise de 15 % porte uniquement sur les licences. La migration coûte 1 800 € une seule fois. Tous les montants sont hors taxes ; ne calcule pas la TVA. Calcule le coût des licences avant et après remise, le total de première année, le total de deuxième année si rien ne change, et le dépassement éventuel du budget de première année de 11 000 €. Montre les opérations, en moins de 160 mots.",
+    "system": "Tu es un assistant pour des agents publics. Réponds en français, de manière concise et exacte. Respecte les seules informations fournies et les contraintes de la demande.",
+    "synthetic": true,
+    "http_status": 200,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 155,
+      "completion_tokens": 159,
+      "total_tokens": 314,
+      "cost": 0.0,
+      "carbon": {
+        "kWh": {
+          "min": 2.2335600670476007e-05,
+          "max": 2.2335600670476007e-05
+        },
+        "kgCO2eq": {
+          "min": 1.3415899297227207e-06,
+          "max": 1.3415899297227207e-06
+        }
+      },
+      "impacts": {
+        "kWh": 2.2335600670476007e-05,
+        "kgCO2eq": 1.3415899297227207e-06
+      },
+      "requests": 1
+    },
+    "answer": "**Coût des licences avant remise :**\n80 licences * 12 € * 12 mois = 11 520 €\n\n**Coût des licences après remise (15 %) :**\n11 520 € * 0,85 = 9 792 €\n\n**Total première année (licences + migration) :**\n9 792 € + 1 800 € = 11 592 €\n\n**Total deuxième année (licences uniquement) :**\n80 * 12 € * 12 = 11 520 €\n\n**Dépassement du budget de première année (11 000 €) :**\n11 592 € - 11 000 € = 592 €",
+    "reasoning_characters": 0,
+    "duration_s": 2.591,
+    "first_text_s": 0.175
+  }
+]

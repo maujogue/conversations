@@ -58,12 +58,18 @@
     <div class="arena-kpi"><span class="label">Abandoned</span><span class="value">{{ h.abandoned }}</span></div>
     <div class="arena-kpi"><span class="label">Errored</span><span class="value">{{ h.errored }}</span></div>
     <div class="arena-kpi"><span class="label">Pending</span><span class="value">{{ h.pending }}</span></div>
-    <div class="arena-kpi"><span class="label">Vote rate</span><span class="value">{% if h.vote_rate is not None %}{% widthratio h.vote_rate 1 100 %}%{% else %}–{% endif %}</span></div>
-    <div class="arena-kpi"><span class="label">Arena cost</span><span class="value">{{ h.total_cost_eur|floatformat:2 }} €</span></div>
+    <div class="arena-kpi"><span class="label">Votes / all comparisons</span><span class="value">{% if h.vote_rate is not None %}{% widthratio h.vote_rate 1 100 %}%{% else %}–{% endif %}</span></div>
+    <div class="arena-kpi"><span class="label">Votes / closed comparisons</span><span class="value">{% if h.closed_vote_rate is not None %}{% widthratio h.closed_vote_rate 1 100 %}%{% else %}–{% endif %}</span></div>
+    <div class="arena-kpi"><span class="label">Recorded Arena cost</span><span class="value">{% if h.total_cost_eur is not None %}{{ h.total_cost_eur|floatformat:2 }} €{% else %}Unknown{% endif %}</span></div>
     <div class="arena-kpi"><span class="label">Refused draws</span><span class="value">{{ h.refused_draws }}</span></div>
   </div>
   <p class="arena-note">Refused draws: turns that were sampled but whose conversation was not pinned to the champion (health fallback in effect).</p>
 
+  <p>Vote coverage includes pending and errored comparisons. Closed vote rate includes voted, abandoned and errored comparisons ({{ h.closed }} closed). Pending comparisons close on an explicit cancellation, a new turn, or retention expiry; reading history never closes them.</p>
+  <p>Costs use the EUR per million token prices captured at each inference claim. {{ h.unpriced_answers }} answers have no recorded price and are excluded from the cost subtotal.</p>
+  {% for reason, count in h.failure_reasons.items %}<p>{{ reason }}: {{ count }}</p>{% endfor %}
+  <p>{{ results.champion.model_hrid }} failures: {{ results.champion.failures }} / {{ results.champion.attempts }} attempts.</p>
+  {% for row in results.challengers %}<p>{{ row.model_hrid }} failures: {{ row.failures }} / {{ row.attempts }} attempts.</p>{% endfor %}
   <h2>Challengers against the champion</h2>
   <table>
     <thead>
@@ -97,7 +103,7 @@
       {% endwith %}
       {% for row in results.challengers %}
       <tr class="{% if row.indicative %}arena-indicative{% endif %}">
-        <td>{{ row.model_hrid }}{% if row.indicative %}<span class="arena-flag" title="Fewer than {{ h.threshold }} votes">indicative</span>{% endif %}</td>
+        <td>{{ row.model_hrid }}{% if row.indicative %}<span class="arena-flag" title="{% if not row.sample_sufficient %}Fewer than {{ h.threshold }} decisive votes{% else %}95% interval still includes 50%; continue observing{% endif %}">indicative</span>{% endif %}</td>
         <td>{{ row.votes }}</td>
         <td>{% if row.win_rate is not None %}{% widthratio row.win_rate 1 100 %}%{% else %}–{% endif %}</td>
         <td>{% if row.ci_low is not None %}{% widthratio row.ci_low 1 100 %}% – {% widthratio row.ci_high 1 100 %}%{% else %}–{% endif %}</td>
@@ -119,7 +125,7 @@
       {% endfor %}
     </tbody>
   </table>
-  <p class="arena-note">Win rate is the share of decisive votes (a side was picked) where the challenger's answer was preferred; "both good" and "both bad" votes are counted separately. Rows under {{ h.threshold }} votes are labeled indicative. Cost ratio is champion cost divided by challenger cost on the same turns.</p>
+  <p class="arena-note">Win rate is the share of decisive votes (a side was picked) where the challenger's answer was preferred; "both good" and "both bad" votes are counted separately. Results remain indicative until there are at least {{ h.threshold }} decisive votes and the 95% interval excludes 50%. Reaching the sample threshold alone does not establish a preference. Cost ratio is champion cost divided by challenger cost on the same turns.</p>
 
   <h2>Win rate by context</h2>
   <table>

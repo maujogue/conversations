@@ -1,0 +1,59 @@
+{
+  "width": 390,
+  "scrollWidth": 390,
+  "buttons": [
+    {
+      "text": "arrow_back\nA est meilleur",
+      "rect": {
+        "x": 19,
+        "y": 678,
+        "width": 126.71875,
+        "height": 44,
+        "top": 678,
+        "right": 145.71875,
+        "bottom": 722,
+        "left": 19
+      }
+    },
+    {
+      "text": "B est meilleur\narrow_forward",
+      "rect": {
+        "x": 244.28125,
+        "y": 678,
+        "width": 126.71875,
+        "height": 44,
+        "top": 678,
+        "right": 371,
+        "bottom": 722,
+        "left": 244.28125
+      }
+    }
+  ],
+  "sides": [
+    {
+      "rect": {
+        "x": 13,
+        "y": 275,
+        "width": 377,
+        "height": 275,
+        "top": 275,
+        "right": 390,
+        "bottom": 550,
+        "left": 13
+      }
+    },
+    {
+      "rect": {
+        "x": 13,
+        "y": 566,
+        "width": 377,
+        "height": 375,
+        "top": 566,
+        "right": 390,
+        "bottom": 941,
+        "left": 13
+      }
+    }
+  ],
+  "canVote": true
+}

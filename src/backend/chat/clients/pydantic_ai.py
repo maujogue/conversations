@@ -91,6 +91,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.files.storage import default_storage
+from django.db import transaction
 from django.utils.module_loading import import_string
 from django.utils.translation import gettext_lazy as _
 
@@ -202,7 +203,10 @@ from chat.tools.document_generic_search_rag import add_document_rag_search_tool_
 from chat.tools.document_search_rag import add_document_rag_search_tool
 from chat.tools.document_summarize import document_summarize, document_summarize_project
 from chat.tools.generate_presentation import generate_presentation
-from chat.tools.self_documentation import build_self_documentation_payload
+from chat.tools.self_documentation import (
+    anonymize_arena_documentation,
+    build_self_documentation_payload,
+)
 from chat.vercel_ai_sdk.core import events_v4, events_v5
 from chat.vercel_ai_sdk.encoder import CURRENT_EVENT_ENCODER_VERSION, EventEncoder
 from chat.vercel_ai_sdk.encoder.encoder import DONE_FRAME
@@ -310,9 +314,9 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             conversation: The chat conversation instance
             user: The authenticated user instance, only used for dynamic feature flags
             arena_comparison: When set, this run is one candidate of a blind arena
-                comparison: nothing is persisted on the conversation, the answer and
-                its metrics land on the comparison for the given ``arena_role``
-                (``champion`` or ``challenger``) and are committed by the vote.
+                comparison: answers and metrics are recorded transactionally for the
+                given ``arena_role`` (``champion`` or ``challenger``). The champion
+                commits immediately; a vote can replace it with the challenger.
         """
         self.conversation = conversation
         self._arena_comparison = arena_comparison
@@ -439,14 +443,12 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
     async def _on_llm_error(self, messages: List[UIMessage], error_code: str) -> None:
         """Keep the user bubble on a normal turn; record the failure on an arena candidate.
 
-        A failing champion candidate also keeps the user bubble, like a normal turn:
-        the production answer is what the history falls back to, so its failure must
-        leave the question visible on reload.
+        Arena failures only update the comparison, under its transaction and version
+        guard. They must not write a user bubble through a stale conversation object.
         """
         if self._arena_comparison is not None:
             await sync_to_async(self._arena_record)(error=error_code)
-            if self._arena_role != "champion":
-                return
+            return
         if messages:
             await self._persist_user_message_on_error(messages[-1])
 
@@ -690,7 +692,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
     # Core agent runner
     # --------------------------------------------------------------------- #
 
-    async def _prepare_agent_run(
+    async def _prepare_agent_run(  # noqa: PLR0912
         self, messages: List[UIMessage]
     ) -> Tuple[str, List, List, Dict[str, str], Dict[str, Union[int, float]], List, bool]:
         """
@@ -716,7 +718,10 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             - conversation_has_own_documents: Whether this
             conversation has its own (non-project) text attachments
         """
-        history = ModelMessagesTypeAdapter.validate_python(self.conversation.pydantic_messages)
+        history_data = self.conversation.pydantic_messages
+        if self._arena_comparison is not None:
+            history_data = anonymize_arena_documentation(history_data)
+        history = ModelMessagesTypeAdapter.validate_python(history_data)
         history = update_history_local_urls(
             self.conversation, history
         )  # presign URLs for local images
@@ -1454,6 +1459,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             """Return a single payload with static and runtime assistant metadata."""
             return ToolReturn(
                 return_value=await build_self_documentation_payload(
+                    arena_mode=self._arena_comparison is not None,
                     model_hrid=self.model_hrid,
                     model_configuration=self.conversation_agent.configuration,
                     tools_configuration={
@@ -1726,10 +1732,11 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
 
         if self._arena_comparison is None:
             generated_title = await self._generate_title_if_needed()
-            await sync_to_async(self.conversation.save)()
+            if not await sync_to_async(self._save_completed_conversation)():
+                generated_title = None
         else:
-            # The candidate is stored on the comparison; the conversation is only
-            # written when the user picks a side. No title from a blind turn either.
+            # Arena commits are handled by the guarded comparison transaction.
+            # A blind candidate never generates a conversation title.
             generated_title = None
 
         cooldown_seconds = await sync_to_async(record_and_compute_cooldown)(
@@ -1833,11 +1840,16 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         # The budget check runs on `history` (stored previous turns) only; the incoming
         # user message is not counted, by design — a turn tipped over by it alone is caught
         # next turn, and the security buffer absorbs the overflow meanwhile (see ADR 0002).
-        async for item in self._run_history_summary_phase(history):
-            if isinstance(item, PreparedHistory):
-                history = item.history
-            else:
-                yield item
+        # Arena runs retain the draw's summary and history for both candidates.
+        # A candidate must not launch a summarization that changes its peer's input.
+        if self._arena_comparison is None:
+            async for item in self._run_history_summary_phase(history):
+                if isinstance(item, PreparedHistory):
+                    history = item.history
+                else:
+                    yield item
+        else:
+            history = self._build_model_history(history)
 
         await self._agent_stop_streaming(force_cache_check=True)
         self._setup_self_documentation_tool()
@@ -1914,6 +1926,19 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                             content.url = rewritten
                     new_content.append(content)
                 part.content = new_content
+
+    def _save_completed_conversation(self) -> bool:
+        """A normal turn must not overwrite a newer Arena turn or roll back its version."""
+        with transaction.atomic():
+            current = (
+                models.ChatConversation.objects.select_for_update()
+                .filter(pk=self.conversation.pk)
+                .first()
+            )
+            if current is None or current.arena_version != self.conversation.arena_version:
+                return False
+            self.conversation.save()
+            return True
 
     def _prepare_update_conversation(
         self,

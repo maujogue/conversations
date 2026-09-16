@@ -23,6 +23,7 @@ from core.file_upload.mixins import AttachmentMixin
 
 from chat import arena as arena_service
 from chat import models, serializers
+from chat.ai_sdk_types import UIMessage
 from chat.clients.pydantic_ai import AIAgentService
 from chat.constants import IMAGE_MIME_PREFIX, SSE_MIME_TYPE
 from chat.keepalive import stream_with_keepalive_async, stream_with_keepalive_sync
@@ -295,10 +296,9 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
         if not messages:
             return Response({"error": "No messages provided"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Arena candidate stream: the model comes from the comparison, nothing is
-        # written on the conversation until the vote. See chat/arena.py.
+        # Claim inference before returning a stream, using the draw's frozen turn.
         arena = self._resolve_arena_stream_params(
-            conversation, query_params_serializer.validated_data
+            conversation, query_params_serializer.validated_data, messages[-1]
         )
         if isinstance(arena, Response):
             return arena
@@ -309,6 +309,9 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
 
         if arena is not None:
             comparison, role, model_hrid = arena
+            conversation = arena_service.snapshot_conversation(conversation, comparison)
+            messages = [UIMessage.model_validate(comparison.input_snapshot["request_ui_message"])]
+            force_web_search = comparison.input_snapshot["force_web_search"]
             ai_service = AIAgentService(
                 conversation=conversation,
                 user=self.request.user,
@@ -416,6 +419,8 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
             model_hrid=None,  # model_hrid is not needed to stop streaming
             language=None,  # language is not needed to stop streaming
         ).stop_streaming()
+        if arena_service.get_pending_comparison(conversation) is not None:
+            arena_service.resolve_pending(conversation, reason="cancelled")
 
         return Response({"status": "OK"}, status=status.HTTP_200_OK)
 

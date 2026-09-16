@@ -17,6 +17,7 @@ from chat import models
 from chat.ai_sdk_types import UIMessage
 from chat.constants import IMAGE_MIME_PREFIX
 from chat.enums import ArenaRole, ArenaSide, ArenaVoteOutcome
+from chat.tools.self_documentation import anonymize_arena_documentation
 
 
 class ChatConversationSerializer(serializers.ModelSerializer):
@@ -92,7 +93,9 @@ class ChatConversationSerializer(serializers.ModelSerializer):
         }
         if restorable:
             payload["answers"] = {
-                side: comparison.payload_for_side(side)["output_ui_message"]
+                side: anonymize_arena_documentation(
+                    comparison.payload_for_side(side)["output_ui_message"]
+                )
                 for side in (ArenaSide.LEFT, ArenaSide.RIGHT)
             }
         return payload
@@ -305,6 +308,13 @@ class ArenaDrawSerializer(serializers.Serializer):  # pylint: disable=abstract-m
     force_web_search = serializers.BooleanField(
         required=False, default=False, help_text="The user forced web search for this turn."
     )
+    message = SchemaField(schema=UIMessage, required=False)
+
+    def validate_message(self, message):
+        """Only user input can start a comparison."""
+        if message.role != "user":
+            raise serializers.ValidationError("A user message is required.")
+        return message
 
 
 class ArenaVoteSerializer(serializers.Serializer):  # pylint: disable=abstract-method

@@ -10,6 +10,7 @@ from datetime import timedelta
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
+from chat.arena import candidate_prices
 from chat.enums import ArenaComparisonStatus, ArenaContextTag, ArenaRole, ArenaSide
 from chat.models import ArenaComparison, ArenaExperiment
 
@@ -64,6 +65,12 @@ class Command(BaseCommand):
 
         rng = random.Random(options["seed"])  # noqa: S311  # demo data, not security
         now = timezone.now()
+        price_reference = ArenaComparison(experiment=experiment)
+        champion_prices = candidate_prices(price_reference, ArenaRole.CHAMPION)
+        challenger_prices = {}
+        for hrid in challengers:
+            price_reference.challenger_model_hrid = hrid
+            challenger_prices[hrid] = candidate_prices(price_reference, ArenaRole.CHALLENGER)
         rows = []
         for _ in range(options["count"]):
             drawn_at = now - timedelta(seconds=rng.uniform(0, options["days"] * 86400))
@@ -89,6 +96,10 @@ class Command(BaseCommand):
                 champion_side=champion_side,
                 status=status,
                 drawn_at=drawn_at,
+                price_snapshot={
+                    ArenaRole.CHAMPION: champion_prices,
+                    ArenaRole.CHALLENGER: challenger_prices[challenger],
+                },
                 champion_prompt_tokens=rng.randint(400, 3000),
                 champion_completion_tokens=champion_completion,
                 champion_latency_ms=int(champion_completion * rng.uniform(18, 35)),
@@ -113,6 +124,7 @@ class Command(BaseCommand):
                     milliseconds=comparison.time_to_vote_ms
                 )
             elif status == ArenaComparisonStatus.ERRORED:
+                comparison.closed_reason = "candidate_failed"
                 comparison.challenger_error = "model_connection_error"
                 comparison.challenger_payload = None
             rows.append(comparison)
