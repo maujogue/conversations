@@ -252,3 +252,112 @@ def test_llmodel_max_token_context_rejects_invalid_value():
             tools=[],
             max_token_context="abc",
         )
+
+
+# ---------------------------------------------------------------------------
+# Footprint / routing fields: role, prices, parameter counts, reasoning control
+# ---------------------------------------------------------------------------
+
+
+def _minimal_model(**overrides) -> LLModel:
+    """Build a minimal valid LLModel with optional overrides."""
+    values = {
+        "hrid": "m",
+        "model_name": "openai:m",
+        "human_readable_name": "M",
+        "is_active": True,
+        "system_prompt": "direct",
+        "tools": [],
+    }
+    values.update(overrides)
+    return LLModel(**values)
+
+
+def test_llmodel_footprint_fields_defaults():
+    """New fields are optional and keep old configurations valid."""
+    model = _minimal_model()
+    assert model.role == "chat"
+    assert model.input_price_eur_per_mtok is None
+    assert model.output_price_eur_per_mtok is None
+    assert model.total_params_b is None
+    assert model.active_params_b is None
+    assert model.reasoning_control == "none"
+
+
+def test_llmodel_footprint_fields_set():
+    """Role, prices, parameter counts and reasoning control are parsed."""
+    model = _minimal_model(
+        role="utility",
+        input_price_eur_per_mtok=0.5,
+        output_price_eur_per_mtok=1.5,
+        total_params_b=117,
+        active_params_b=5.1,
+        reasoning_control="levels",
+    )
+    assert model.role == "utility"
+    assert model.input_price_eur_per_mtok == 0.5
+    assert model.output_price_eur_per_mtok == 1.5
+    assert model.total_params_b == 117
+    assert model.active_params_b == pytest.approx(5.1)
+    assert model.reasoning_control == "levels"
+
+
+def test_llmodel_dense_model_active_defaults_to_total():
+    """Only total_params_b given: active_params_b is filled with the same value."""
+    model = _minimal_model(total_params_b=24)
+    assert model.active_params_b == 24
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"role": "admin"}, id="bad_role"),
+        pytest.param({"reasoning_control": "maybe"}, id="bad_reasoning_control"),
+        pytest.param({"active_params_b": 5}, id="active_without_total"),
+        pytest.param({"total_params_b": 5, "active_params_b": 10}, id="active_above_total"),
+    ],
+)
+def test_llmodel_footprint_fields_invalid(overrides):
+    """Invalid role, reasoning control or inconsistent parameter counts are rejected."""
+    with pytest.raises(ValueError):
+        _minimal_model(**overrides)
+
+
+@pytest.mark.parametrize(
+    "config_file",
+    ["default.json", "default.e2e.json"],
+)
+def test_default_configuration_files_validate(config_file, monkeypatch):
+    """The shipped configuration files load with the new fields."""
+    from pathlib import Path  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    for name in (
+        "AI_MODEL",
+        "AI_BASE_URL",
+        "AI_API_KEY",
+        "AI_AGENT_INSTRUCTIONS",
+        "SUMMARIZATION_SYSTEM_PROMPT",
+    ):
+        monkeypatch.setattr(django.conf.settings, name, "value", raising=False)
+    monkeypatch.setattr(django.conf.settings, "AI_AGENT_TOOLS", [], raising=False)
+
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "conversations"
+        / "configuration"
+        / "llm"
+        / config_file
+    )
+    models = load_llm_configuration(str(path))
+
+    assert models["default-model"].role == "chat"
+    if config_file == "default.json":
+        assert models["default-summarization-model"].role == "utility"
+        gpt_oss = models["gpt-oss-120b"]
+        assert gpt_oss.model_name == "gpt-oss-120b"
+        assert gpt_oss.supports_image is False
+        assert (gpt_oss.total_params_b, gpt_oss.active_params_b) == (117, pytest.approx(5.1))
+        assert gpt_oss.reasoning_control == "levels"
+        assert models["deepseek-v4-flash"].reasoning_control == "toggle"
+        assert models["ministral-3-8b"].active_params_b == 8
+        assert models["qwen3-coder-30b"].active_params_b == 3

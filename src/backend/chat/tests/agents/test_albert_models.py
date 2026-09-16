@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from openai.types.chat import ChatCompletion
+from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
+from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from pydantic import ValidationError
 from pydantic_ai.models.openai import OpenAIStreamedResponse
 from pydantic_ai.usage import RequestUsage
@@ -314,3 +316,81 @@ def test_validate_completion_rejects_non_list_choices(albert_model, choices_valu
     )
     with pytest.raises(ValidationError):
         albert_model._validate_completion(response)
+
+
+# ---------------------------------------------------------------------------
+# AlbertOpenAIStreamedResponse: reasoning accumulation
+# ---------------------------------------------------------------------------
+
+
+def _reasoning_choice(**delta_fields):
+    """Build a chunk choice whose delta carries the given extra fields (e.g. reasoning=...)."""
+    delta = ChoiceDelta(**delta_fields)
+    return ChunkChoice(index=0, delta=delta, finish_reason=None)
+
+
+def test_map_thinking_delta_accumulates_reasoning_chars(streamed_response):
+    """`delta.reasoning` and `delta.reasoning_content` lengths add up across chunks."""
+    with patch.object(OpenAIStreamedResponse, "_map_thinking_delta", return_value=iter(())):
+        list(streamed_response._map_thinking_delta(_reasoning_choice(reasoning="Let me ")))
+        list(streamed_response._map_thinking_delta(_reasoning_choice(reasoning="think.")))
+        list(streamed_response._map_thinking_delta(_reasoning_choice(reasoning_content="Yes")))
+        # A plain content chunk without reasoning does not count.
+        list(streamed_response._map_thinking_delta(_reasoning_choice(content="Hello")))
+
+    assert streamed_response._reasoning_chars == len("Let me think.Yes")
+
+
+def test_map_usage_reports_reasoning_chars_once(streamed_response):
+    """Accumulated reasoning chars are flushed into usage details, only once per usage chunk."""
+    with patch.object(OpenAIStreamedResponse, "_map_thinking_delta", return_value=iter(())):
+        list(streamed_response._map_thinking_delta(_reasoning_choice(reasoning="x" * 800)))
+
+    chunk = MagicMock()
+    chunk.usage = MagicMock()
+    chunk.usage.model_extra = {}
+    chunk.usage.completion_tokens_details = None
+
+    with patch.object(
+        OpenAIStreamedResponse, "_map_usage", return_value=RequestUsage(output_tokens=1)
+    ):
+        first = streamed_response._map_usage(chunk)
+    assert first.details["reasoning_chars"] == 800
+
+    with patch.object(
+        OpenAIStreamedResponse, "_map_usage", return_value=RequestUsage(output_tokens=1)
+    ):
+        second = streamed_response._map_usage(chunk)
+    assert "reasoning_chars" not in second.details
+
+
+def test_map_usage_keeps_provider_reasoning_tokens(streamed_response):
+    """`completion_tokens_details.reasoning_tokens` is stored alongside the co2 factor."""
+    chunk = MagicMock()
+    chunk.usage = MagicMock()
+    chunk.usage.model_extra = {"impacts": {"kgCO2eq": 1e-9}}
+    chunk.usage.completion_tokens_details = MagicMock()
+    chunk.usage.completion_tokens_details.reasoning_tokens = 321
+
+    with patch.object(
+        OpenAIStreamedResponse, "_map_usage", return_value=RequestUsage(output_tokens=1)
+    ):
+        result = streamed_response._map_usage(chunk)
+
+    assert result.details["reasoning_tokens"] == 321
+    assert result.details["co2_impact_factor_20"] == int(1e-9 * 10**20)
+    assert "reasoning_chars" not in result.details
+
+
+def test_map_usage_without_usage_leaves_reasoning_pending(streamed_response):
+    """A chunk without usage does not flush reasoning chars."""
+    with patch.object(OpenAIStreamedResponse, "_map_thinking_delta", return_value=iter(())):
+        list(streamed_response._map_thinking_delta(_reasoning_choice(reasoning="abcd")))
+
+    chunk = MagicMock()
+    chunk.usage = None
+    with patch.object(OpenAIStreamedResponse, "_map_usage", return_value=RequestUsage()):
+        result = streamed_response._map_usage(chunk)
+
+    assert "reasoning_chars" not in result.details
+    assert streamed_response._reasoning_chars == 4
