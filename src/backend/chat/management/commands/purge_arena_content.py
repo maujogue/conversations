@@ -26,7 +26,6 @@ class Command(BaseCommand):
             | Q(challenger_payload__isnull=False)
             | ~Q(champion_trace_id="")
             | ~Q(challenger_trace_id="")
-            | ~Q(theme="")
         )
         count = 0
         for comparison in expired.only("pk", "conversation_id").iterator(chunk_size=200):

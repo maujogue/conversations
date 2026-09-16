@@ -17,7 +17,6 @@ def redact_comparisons(queryset, reason):
         challenger_payload=None,
         champion_trace_id="",
         challenger_trace_id="",
-        theme="",
         champion_error=db_models.Case(
             db_models.When(
                 champion_error__in=["", "cancelled", "unfinished when the comparison was resolved"],

@@ -1,11 +1,14 @@
 """
 Arena: blind champion-versus-challenger comparisons of LLM answers.
 
-An arena turn streams two answers to the same user message, one from the
-conversation's pinned production model (the champion) and one from a challenger
-drawn from the active ``ArenaExperiment``. The user picks one; the pick is stored
-on an ``ArenaComparison`` and the chosen answer is committed to the conversation.
-Model names are never shown to the user. See ``docs/arena-mvp-spec.md``.
+An arena turn streams two answers to the same user message, one from the model of
+the turn's tier (the champion) and one from a challenger drawn from the active
+``ArenaExperiment`` of that tier. The user picks one; the pick is stored on an
+``ArenaComparison`` and the chosen answer is committed to the conversation. A
+second opinion asked for by the user (``origin=manual``) compares the answer
+already in the history against one untried alternative of the same tier.
+Model names are never shown to the user. See ``docs/arena-mvp-spec.md`` and
+``docs/llm-router-spec.md`` sections 8.1 and 8.2.
 """
 
 import logging
@@ -24,10 +27,12 @@ from core.feature_flags.helpers import is_feature_enabled
 
 from chat import models
 from chat.ai_sdk_types import FileUIPart, UIMessage
+from chat.arena_scores import push_comparison_scores
 from chat.constants import IMAGE_MIME_PREFIX
 from chat.enums import (
     ArenaComparisonStatus,
     ArenaContextTag,
+    ArenaOrigin,
     ArenaRole,
     ArenaSide,
     ArenaVoteOutcome,
@@ -45,6 +50,12 @@ logger = logging.getLogger(__name__)
 SIDE_EFFECT_TOOL_NAMES = frozenset({"generate_presentation"})
 
 RED = models.ModelHealth.Status.RED
+
+# Share of an experiment's draws given to its control challenger (router spec 5.4).
+CONTROL_DRAW_RATE = 0.05
+
+
+MANUAL_EXPERIMENT_NAME = "Second opinion ({tier})"
 
 
 class ArenaConflict(Exception):
@@ -68,13 +79,17 @@ def _count_refused_draw(experiment_id) -> None:
         cache.set(key, 1, timeout=None)
 
 
-def get_active_experiment() -> models.ArenaExperiment | None:
-    """The single active experiment, with its challengers prefetched."""
-    return (
-        models.ArenaExperiment.objects.filter(is_active=True)
-        .prefetch_related("challengers")
-        .first()
-    )
+def get_active_experiment(tier: str | None = None) -> models.ArenaExperiment | None:
+    """The active experiment of ``tier``, with its challengers prefetched.
+
+    At most one experiment is active per tier (router spec 8.1). Without a tier
+    the first active experiment is returned, which is what a turn that was not
+    routed (router flag off) compares on.
+    """
+    queryset = models.ArenaExperiment.objects.filter(is_active=True).prefetch_related("challengers")
+    if tier is not None:
+        queryset = queryset.filter(tier=tier)
+    return queryset.first()
 
 
 def compute_context_tags(
@@ -152,68 +167,164 @@ def _conversation_has_image(conversation: models.ChatConversation) -> bool:
     ).exists()
 
 
+def turn_constraints(
+    conversation: models.ChatConversation,
+    last_message: UIMessage | None,
+    force_web_search: bool = False,
+):
+    """Hard capabilities the models of this turn must have (router spec 5.1).
+
+    Reuses the router's own ``TurnConstraints`` so a challenger is held to exactly
+    the same bar as the tier model. Imported lazily: ``chat.router.routing`` imports
+    this module for ``message_has_image``.
+    """
+    from chat.router.routing import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,cyclic-import
+        TurnConstraints,
+        estimate_history_tokens,
+    )
+
+    return TurnConstraints(
+        needs_image=message_has_image(last_message) or _conversation_has_image(conversation),
+        needs_web_search=force_web_search,
+        context_tokens=(estimate_history_tokens(conversation, last_message) if last_message else 0),
+    )
+
+
+def model_fits_turn(model_hrid: str, constraints) -> bool:
+    """Whether a configured, healthy model can serve a turn with these constraints."""
+    if _is_red(model_hrid):
+        return False
+    return constraints.satisfied_by(settings.LLM_CONFIGURATIONS.get(model_hrid))
+
+
 def _eligible_challengers(
-    experiment, conversation: models.ChatConversation, last_message: UIMessage | None
-) -> list[str]:
-    """Challengers that are healthy and, if the turn carries an image, can read images."""
-    needs_image = message_has_image(last_message) or _conversation_has_image(conversation)
-    eligible = []
+    experiment,
+    conversation: models.ChatConversation,
+    last_message: UIMessage | None,
+    force_web_search: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Challengers that are healthy and satisfy the turn's constraints.
+
+    Returns ``(regular, control)``: the control challenger is drawn apart, on a
+    fixed share of the draws, and never enters the scoreboard (router spec 5.4).
+    """
+    constraints = turn_constraints(conversation, last_message, force_web_search)
+    regular: list[str] = []
+    control: list[str] = []
     for challenger in experiment.challengers.all():
-        configuration = settings.LLM_CONFIGURATIONS.get(challenger.model_hrid)
-        if configuration is None or not configuration.is_active:
+        if not model_fits_turn(challenger.model_hrid, constraints):
             continue
-        if needs_image and not configuration.supports_image:
-            continue
-        if _is_red(challenger.model_hrid):
-            continue
-        eligible.append(challenger.model_hrid)
-    return eligible
+        (control if challenger.is_control else regular).append(challenger.model_hrid)
+    return regular, control
+
+
+def _pick_challenger(regular: list[str], control: list[str]) -> str | None:
+    """The control challenger on ``CONTROL_DRAW_RATE`` of the draws, else a regular one."""
+    if control and (not regular or random.random() < CONTROL_DRAW_RATE):  # noqa: S311
+        return random.choice(control)  # noqa: S311
+    if not regular:
+        return None
+    return random.choice(regular)  # noqa: S311
 
 
 def _turn_index(conversation: models.ChatConversation) -> int:
     return sum(1 for message in conversation.messages if message.role == "user") + 1
 
 
+def routing_fields(decision) -> dict:
+    """Routing labels of a turn, as the flat columns of a comparison (router spec 8.1)."""
+    if decision is None:
+        return {}
+    labels = decision.labels
+    return {
+        "tier": decision.tier.value,
+        "tier_source": decision.tier_source.value,
+        "domain": labels.domain.value if labels else "",
+        "task": labels.task.value if labels else "",
+        "router_confidence": decision.router_confidence,
+        "router_reason": decision.reason.value,
+        "router_model_hrid": decision.router_model_hrid or "",
+        "router_prompt_version": decision.router_prompt_version or "",
+    }
+
+
+def effort_for_comparison(experiment, decision) -> str | None:
+    """Reasoning effort both sides run at: the experiment's override, else the router's."""
+    if experiment.reasoning_effort:
+        return experiment.reasoning_effort
+    if decision is not None and decision.reasoning_effort is not None:
+        return decision.reasoning_effort.value
+    return None
+
+
+def _input_snapshot(conversation, last_message, force_web_search, reasoning_effort=None) -> dict:
+    """The turn input both candidates read, frozen at draw time."""
+    return {
+        "messages": [m.model_dump(mode="json") for m in conversation.messages],
+        "pydantic_messages": conversation.pydantic_messages,
+        "history_summary": conversation.history_summary,
+        "history_summary_checkpoint": conversation.history_summary_checkpoint,
+        "request_ui_message": last_message.model_dump(mode="json") if last_message else None,
+        "force_web_search": force_web_search,
+        "reasoning_effort": reasoning_effort,
+    }
+
+
 @transaction.atomic
-def draw_comparison(  # noqa: PLR0911  # pylint: disable=too-many-return-statements
+def draw_comparison(  # noqa: PLR0911  # pylint: disable=too-many-return-statements,too-many-arguments
     *,
     conversation: models.ChatConversation,
     user,
     force_web_search: bool,
     last_message: UIMessage | None = None,
+    routing_decision=None,
 ) -> models.ArenaComparison | None:
     """Decide whether the next turn is an arena turn and, if so, create the comparison.
 
     Runs every eligibility rule of the spec. Returns ``None`` when the turn is a
     normal one. A pending comparison left on the conversation is resolved first, so
     a reload or a quick second message never leaves two comparisons open.
+
+    ``routing_decision`` is the router's decision for this turn when the router is
+    on: it selects the experiment (one per tier), its labels are stored on the
+    comparison and its effort applies to both sides. Without it the single active
+    experiment is used and the routing columns stay empty.
     """
     if not is_feature_enabled(user, "arena"):
         return None
-    experiment = get_active_experiment()
+    tier = routing_decision.tier.value if routing_decision is not None else None
+    experiment = get_active_experiment(tier=tier)
     if experiment is None:
         return None
 
     # All turn transitions lock the conversation before the comparison.
     conversation = models.ChatConversation.objects.select_for_update().get(pk=conversation.pk)
     resolve_pending(conversation)
-    _pin_conversation_to_champion(conversation)
-
-    if conversation.model_hrid != experiment.champion_model_hrid:
+    champion_hrid = experiment.champion_model_hrid
+    if routing_decision is None:
+        _pin_conversation_to_champion(conversation)
+        on_champion = conversation.model_hrid == champion_hrid
+    else:
+        # With the router on, the model is chosen per turn: the comparison only makes
+        # sense when the turn actually landed on the tier model (no health cascade,
+        # no constraint walk).
+        on_champion = routing_decision.model_hrid == champion_hrid
+    if not on_champion:
         _count_refused_draw(experiment.pk)
         return None
-    if _is_red(experiment.champion_model_hrid):
+    if _is_red(champion_hrid):
         return None
     if random.random() >= experiment.sampling_rate:  # noqa: S311  # not security-sensitive
         return None
     if _user_draws_today(experiment, user) >= experiment.daily_cap_per_user:
         return None
 
-    challengers = _eligible_challengers(experiment, conversation, last_message)
-    if not challengers:
+    challenger_hrid = _pick_challenger(
+        *_eligible_challengers(experiment, conversation, last_message, force_web_search)
+    )
+    if challenger_hrid is None:
         return None
 
-    challenger_hrid = random.choice(challengers)  # noqa: S311
     champion_side = random.choice([ArenaSide.LEFT, ArenaSide.RIGHT])  # noqa: S311
 
     comparison = models.ArenaComparison.objects.create(
@@ -223,18 +334,18 @@ def draw_comparison(  # noqa: PLR0911  # pylint: disable=too-many-return-stateme
         turn=_turn_index(conversation),
         context_tags=compute_context_tags(conversation, force_web_search),
         tools_stripped=is_feature_enabled(user, "presentation_generation"),
-        champion_model_hrid=experiment.champion_model_hrid,
+        champion_model_hrid=champion_hrid,
         challenger_model_hrid=challenger_hrid,
         champion_side=champion_side,
         conversation_version=conversation.arena_version,
-        input_snapshot={
-            "messages": [m.model_dump(mode="json") for m in conversation.messages],
-            "pydantic_messages": conversation.pydantic_messages,
-            "history_summary": conversation.history_summary,
-            "history_summary_checkpoint": conversation.history_summary_checkpoint,
-            "request_ui_message": last_message.model_dump(mode="json") if last_message else None,
-            "force_web_search": force_web_search,
-        },
+        origin=ArenaOrigin.DRAW.value,
+        **routing_fields(routing_decision),
+        input_snapshot=_input_snapshot(
+            conversation,
+            last_message,
+            force_web_search,
+            effort_for_comparison(experiment, routing_decision),
+        ),
     )
     logger.info(
         "Arena draw on conversation %s: %s vs %s (champion on the %s)",
@@ -242,6 +353,186 @@ def draw_comparison(  # noqa: PLR0911  # pylint: disable=too-many-return-stateme
         comparison.champion_model_hrid,
         comparison.challenger_model_hrid,
         champion_side,
+    )
+    return comparison
+
+
+# --------------------------------------------------------------------------- #
+# Second opinion on demand (router spec 8.2)
+# --------------------------------------------------------------------------- #
+
+
+def _last_turn_pydantic_messages(conversation: models.ChatConversation) -> list:
+    """The stored model messages of the last turn: its request and everything after.
+
+    Used to describe the answer already in the history as a candidate payload, so a
+    vote for the second opinion can swap the whole turn, not just the visible bubble.
+    """
+    history = list(conversation.pydantic_messages or [])
+    for index in range(len(history) - 1, -1, -1):
+        entry = history[index]
+        if not isinstance(entry, dict) or entry.get("kind") != "request":
+            continue
+        parts = entry.get("parts") or []
+        if any(isinstance(p, dict) and p.get("part_kind") == "user-prompt" for p in parts):
+            return history[index:]
+    return []
+
+
+def committed_answer_payload(conversation: models.ChatConversation) -> dict:
+    """The answer already in the conversation, shaped like a candidate payload.
+
+    Usage is zeroed on purpose: the conversation only keeps running totals, so the
+    champion's own token counts for that turn are not recoverable. Swapping the turn
+    therefore adds the challenger's usage without subtracting an invented figure.
+    """
+    return {
+        "request_ui_message": None,
+        "output_ui_message": conversation.messages[-1].model_dump(mode="json"),
+        "pydantic_messages": _last_turn_pydantic_messages(conversation),
+        "usage": {"promptTokens": 0, "completionTokens": 0, "co2_impact": 0},
+    }
+
+
+def _tier_of_committed_turn(conversation: models.ChatConversation, champion_hrid: str) -> str:
+    """Tier the last answer ran on: its routing record, else the tier owning the model."""
+    from chat.router.routing import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,cyclic-import
+        tier_of_model,
+    )
+
+    recorded = (conversation.last_routing or {}).get("tier")
+    if recorded:
+        return recorded
+    tier_settings = models.RoutingTierSettings.get_solo()
+    tier = tier_of_model(tier_settings, champion_hrid)
+    return tier.value if tier is not None else ""
+
+
+def tried_models_on_turn(conversation, turn: int) -> set[str]:
+    """Models already compared on this turn, so the button never repeats one."""
+    rows = models.ArenaComparison.objects.filter(conversation=conversation, turn=turn).values_list(
+        "champion_model_hrid", "challenger_model_hrid"
+    )
+    return {hrid for row in rows for hrid in row if hrid}
+
+
+def untried_alternatives(conversation, turn, tier, champion_hrid, constraints) -> list[str]:
+    """Same-tier alternatives that fit the turn and have not answered it yet."""
+    tier_settings = models.RoutingTierSettings.get_solo()
+    tried = tried_models_on_turn(conversation, turn) | {champion_hrid}
+    return [
+        hrid
+        for hrid in tier_settings.alternatives_for(tier)
+        if hrid not in tried and model_fits_turn(hrid, constraints)
+    ]
+
+
+def manual_container_experiment(tier: str) -> models.ArenaExperiment:
+    """Return the per-tier home for user-initiated comparisons, creating it once.
+
+    It is never active and never sampled, so it competes with no real experiment
+    and never draws on its own; it only gives manual votes somewhere to live.
+    """
+    experiment, _ = models.ArenaExperiment.objects.get_or_create(
+        name=MANUAL_EXPERIMENT_NAME.format(tier=tier),
+        defaults={
+            "tier": tier,
+            "is_active": False,
+            "sampling_rate": 0,
+            "daily_cap_per_user": 0,
+            "description": (
+                "Second opinions requested by users on this tier. Not sampled: "
+                "rows arrive only when someone asks for another answer."
+            ),
+        },
+    )
+    return experiment
+
+
+@transaction.atomic
+def create_manual_comparison(
+    *, conversation: models.ChatConversation, user, message_id: str
+) -> models.ArenaComparison:
+    """Run a second opinion on the last answer (router spec 8.2).
+
+    The champion side is the answer already in the conversation, copied into the
+    comparison so only the challenger has to stream. Raises ``ArenaConflict`` with a
+    machine-readable code when the turn cannot be compared.
+    """
+    conversation = models.ChatConversation.objects.select_for_update().get(pk=conversation.pk)
+    resolve_pending(conversation)
+
+    messages = list(conversation.messages)
+    if not messages or messages[-1].role != "assistant":
+        raise ArenaConflict("arena_manual_no_answer")
+    if messages[-1].id != message_id:
+        raise ArenaConflict("arena_manual_not_last_message")
+
+    champion_hrid = conversation.model_hrid
+    tier = _tier_of_committed_turn(conversation, champion_hrid)
+    if tier is None or _is_red(champion_hrid):
+        raise ArenaConflict("arena_manual_unavailable")
+    # A second opinion is a user action, not an experiment: it must work on every
+    # tier, including tiers nobody is currently running an experiment on. When
+    # there is no active experiment the comparison is filed under a per-tier
+    # container so its votes still have a results page.
+    experiment = get_active_experiment(tier=tier) or manual_container_experiment(tier)
+
+    turn = sum(1 for message in messages if message.role == "user")
+    # The challenger answers the same question from the same history: the committed
+    # turn (its user bubble and the answer) is peeled off and replayed.
+    history_messages = messages[:-1]
+    request_ui_message = None
+    if history_messages and history_messages[-1].role == "user":
+        request_ui_message = history_messages[-1]
+        history_messages = history_messages[:-1]
+    constraints = turn_constraints(conversation, request_ui_message)
+    candidates = untried_alternatives(conversation, turn, tier, champion_hrid, constraints)
+    if not candidates:
+        raise ArenaConflict("arena_manual_exhausted")
+
+    challenger_hrid = random.choice(candidates)  # noqa: S311
+    champion_side = random.choice([ArenaSide.LEFT, ArenaSide.RIGHT])  # noqa: S311
+    history = _last_turn_pydantic_messages(conversation)
+    comparison = models.ArenaComparison.objects.create(
+        experiment=experiment,
+        conversation=conversation,
+        user=user,
+        turn=turn,
+        context_tags=compute_context_tags(conversation, force_web_search=False),
+        tools_stripped=is_feature_enabled(user, "presentation_generation"),
+        champion_model_hrid=champion_hrid,
+        challenger_model_hrid=challenger_hrid,
+        champion_side=champion_side,
+        conversation_version=conversation.arena_version,
+        origin=ArenaOrigin.MANUAL.value,
+        tier=tier,
+        domain=(conversation.last_routing or {}).get("labels", {}).get("domain", "") or "",
+        task=(conversation.last_routing or {}).get("labels", {}).get("task", "") or "",
+        # The champion already answered: its side is finished and committed, only the
+        # challenger streams.
+        champion_payload=committed_answer_payload(conversation),
+        champion_finished_at=timezone.now(),
+        champion_started_at=timezone.now(),
+        champion_committed=True,
+        input_snapshot={
+            **_input_snapshot(
+                conversation,
+                request_ui_message,
+                force_web_search=False,
+                reasoning_effort=experiment.reasoning_effort or None,
+            ),
+            "messages": [m.model_dump(mode="json") for m in history_messages],
+            "pydantic_messages": list(conversation.pydantic_messages or [])[
+                : len(conversation.pydantic_messages or []) - len(history)
+            ],
+        },
+    )
+    logger.info(
+        "Arena second opinion on conversation %s: %s vs %s",
+        conversation.pk,
+        champion_hrid,
+        challenger_hrid,
     )
     return comparison
 
@@ -275,23 +566,25 @@ def _version_matches(comparison) -> bool:
 
 
 def candidate_prices(comparison, role) -> dict:
-    """Immutable EUR/token pricing revision captured when inference is claimed."""
-    if role == ArenaRole.CHAMPION:
-        experiment = models.ArenaExperiment.objects.get(pk=comparison.experiment_id)
-        prices = (
-            experiment.champion_input_price_eur_per_mtok,
-            experiment.champion_output_price_eur_per_mtok,
-        )
-    else:
-        challenger = comparison.experiment.challengers.filter(
-            model_hrid=comparison.challenger_model_hrid
-        ).first()
-        if challenger is None:
-            return {}
-        prices = (challenger.input_price_eur_per_mtok, challenger.output_price_eur_per_mtok)
+    """Immutable EUR/token pricing revision captured when inference is claimed.
+
+    Prices are declared once, on the model of the LLM configuration
+    (``input_price_eur_per_mtok`` / ``output_price_eur_per_mtok``); the arena admin
+    has no price field of its own any more (router spec 12). The snapshot freezes
+    them on the comparison, so editing the configuration never reprices past
+    inference. A model with no configured price yields an empty snapshot and its
+    answers are counted as unpriced on the results page.
+    """
+    configuration = settings.LLM_CONFIGURATIONS.get(getattr(comparison, f"{role}_model_hrid"))
+    if configuration is None:
+        return {}
+    input_price = configuration.input_price_eur_per_mtok
+    output_price = configuration.output_price_eur_per_mtok
+    if input_price is None or output_price is None:
+        return {}
     return {
-        "input": str(prices[0]),
-        "output": str(prices[1]),
+        "input": str(input_price),
+        "output": str(output_price),
         "currency": "EUR",
         "unit": "million_tokens",
         "captured_at": timezone.now().isoformat(),
@@ -389,6 +682,9 @@ def record_side_result(  # noqa: PLR0913  # pylint: disable=too-many-arguments
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
     co2_impact: float | None = None,
+    co2_source: str = "",
+    reasoning_tokens: int | None = None,
+    reasoning_effort: str = "",
     latency_ms: int | None = None,
     first_token_ms: int | None = None,
     trace_id: str = "",
@@ -410,6 +706,9 @@ def record_side_result(  # noqa: PLR0913  # pylint: disable=too-many-arguments
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             co2_impact=co2_impact,
+            co2_source=co2_source or "",
+            reasoning_tokens=reasoning_tokens,
+            reasoning_effort=reasoning_effort or "",
             latency_ms=latency_ms,
             first_token_ms=first_token_ms,
             trace_id=trace_id,
@@ -540,13 +839,25 @@ def resolve_pending(
         current_conversation.arena_version += 1
         current_conversation.save(update_fields=["arena_version"])
         conversation.refresh_from_db()
-        return pending
+    push_comparison_scores(pending)
+    return pending
 
 
 DRAW_OUTCOMES = (ArenaVoteOutcome.TIE.value, ArenaVoteOutcome.BOTH_BAD.value)
 
 
 def vote(comparison: models.ArenaComparison, side: str | None) -> models.ArenaComparison:
+    """Record the user's pick, commit the chosen answer and score both traces.
+
+    Thin wrapper around ``_vote``: whatever the outcome, the closed comparison is
+    pushed to Langfuse as an ``arena_preference`` score on both sides (spec 12).
+    """
+    comparison = _vote(comparison, side)
+    push_comparison_scores(comparison)
+    return comparison
+
+
+def _vote(comparison: models.ArenaComparison, side: str | None) -> models.ArenaComparison:
     """Record the user's pick and commit the chosen answer.
 
     ``side`` is the displayed column, never a model name, or one of the draw
@@ -651,6 +962,42 @@ def _vote_draw(comparison: models.ArenaComparison, outcome: str) -> models.Arena
         ]
     )
     return comparison
+
+
+MILESTONES = {1: "first_vote", 10: "tenth_vote", 100: "hundredth_vote"}
+
+
+def _label(comparison: models.ArenaComparison, field: str) -> str | None:
+    """i18n key for a routing field of the comparison, ``None`` when absent or empty.
+
+    ``tier``, ``task`` and ``domain`` land on the model with the router; until then
+    the block simply carries no label.
+    """
+    value = getattr(comparison, field, None)
+    if not value:
+        return None
+    return f"router.{field}.{value}"
+
+
+def build_acknowledgement(comparison: models.ArenaComparison, user) -> dict | None:
+    """The thank-you block returned by the vote endpoint (spec section 11.1).
+
+    Draws are votes and get the block; abandonment (status other than ``voted``)
+    returns ``None``. ``user_votes`` spans all experiments: the 90-day redaction
+    nulls ``user`` on old comparisons, so the count is naturally "recent".
+    """
+    if comparison.status != ArenaComparisonStatus.VOTED or user is None:
+        return None
+    voted = models.ArenaComparison.objects.filter(status=ArenaComparisonStatus.VOTED)
+    user_votes = voted.filter(user=user).count()
+    return {
+        "user_votes": user_votes,
+        "experiment_votes": voted.filter(experiment_id=comparison.experiment_id).count(),
+        "tier_label": _label(comparison, "tier"),
+        "task_label": _label(comparison, "task"),
+        "domain_label": _label(comparison, "domain"),
+        "milestone": MILESTONES.get(user_votes),
+    }
 
 
 def used_web_search(new_messages: Iterable) -> bool:

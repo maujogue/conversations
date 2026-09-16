@@ -16,8 +16,11 @@ from core.file_upload.utils import generate_upload_policy
 from chat import models
 from chat.ai_sdk_types import UIMessage
 from chat.constants import IMAGE_MIME_PREFIX
-from chat.enums import ArenaRole, ArenaSide, ArenaVoteOutcome
+from chat.enums import ArenaRole, ArenaSide, ArenaVoteOutcome, RoutingTier
 from chat.tools.self_documentation import anonymize_arena_documentation
+
+# `tier` query parameter value meaning "let the router choose" (router spec 5.3).
+TIER_AUTO = "auto"
 
 
 class ChatConversationSerializer(serializers.ModelSerializer):
@@ -210,9 +213,22 @@ class ChatConversationRequestSerializer(serializers.Serializer):
     model_hrid = serializers.CharField(
         required=False,
         default=None,
-        help_text="HRID of the model to use for the conversation.",
+        help_text=(
+            "HRID of the model to use for the conversation. Staff only, behind the"
+            " `dev_model_picker` feature flag; rejected with a 400 otherwise."
+        ),
         allow_blank=True,
         trim_whitespace=True,
+    )
+    tier = serializers.ChoiceField(
+        choices=[TIER_AUTO, *[tier.value for tier in RoutingTier]],
+        required=False,
+        default=None,
+        allow_null=True,
+        help_text=(
+            "Complexity tier pinned on the conversation for this and the next turns:"
+            " `auto` lets the router choose, the others pin the tier (router spec 5.3)."
+        ),
     )
     arena_comparison = serializers.UUIDField(
         required=False,
@@ -317,6 +333,24 @@ class ArenaDrawSerializer(serializers.Serializer):  # pylint: disable=abstract-m
         return message
 
 
+class ArenaManualSerializer(serializers.Serializer):  # pylint: disable=abstract-method
+    """Input of the second-opinion endpoint: which answer to get another opinion on."""
+
+    message_id = serializers.CharField(
+        help_text="Id of the assistant message to compare; it must be the last one."
+    )
+
+
+class ArenaManualResponseSerializer(serializers.Serializer):  # pylint: disable=abstract-method
+    """Output of the second-opinion endpoint: the comparison and the side to stream."""
+
+    comparison_id = serializers.CharField()
+    side = serializers.ChoiceField(
+        choices=[ArenaSide.LEFT.value, ArenaSide.RIGHT.value],
+        help_text="Displayed column the challenger must be streamed into.",
+    )
+
+
 class ArenaVoteSerializer(serializers.Serializer):  # pylint: disable=abstract-method
     """Input of the arena vote: a displayed side, a draw, or null to abandon."""
 
@@ -335,6 +369,30 @@ class ArenaVoteSerializer(serializers.Serializer):  # pylint: disable=abstract-m
     )
 
 
+class ArenaAcknowledgementSerializer(serializers.Serializer):  # pylint: disable=abstract-method
+    """Thank-you block returned with a vote (never with an abandonment)."""
+
+    user_votes = serializers.IntegerField(help_text="Votes of this user on recent comparisons.")
+    experiment_votes = serializers.IntegerField(help_text="Votes recorded on this experiment.")
+    tier_label = serializers.CharField(allow_null=True, help_text="i18n key router.tier.<tier>.")
+    task_label = serializers.CharField(allow_null=True, help_text="i18n key router.task.<task>.")
+    domain_label = serializers.CharField(
+        allow_null=True, help_text="i18n key router.domain.<domain>."
+    )
+    milestone = serializers.ChoiceField(
+        choices=["first_vote", "tenth_vote", "hundredth_vote"], allow_null=True
+    )
+
+
+class ArenaVoteResponseSerializer(ChatConversationSerializer):
+    """Vote response: the conversation plus the acknowledgement block (schema only)."""
+
+    acknowledgement = ArenaAcknowledgementSerializer(allow_null=True, read_only=True)
+
+    class Meta(ChatConversationSerializer.Meta):  # pylint: disable=missing-class-docstring
+        fields = [*ChatConversationSerializer.Meta.fields, "acknowledgement"]
+
+
 # Roles are only ever used server side; exported here so views share one source.
 ARENA_ROLES = (ArenaRole.CHAMPION.value, ArenaRole.CHALLENGER.value)
 
@@ -345,10 +403,32 @@ class EditInDocsSerializer(serializers.Serializer):  # pylint: disable=abstract-
     message_id = serializers.CharField(help_text="ID of the assistant message to edit in Docs.")
 
 
-class LLMConfigurationSerializer(serializers.Serializer):  # pylint: disable=abstract-method
-    """Serializer for LLM configuration."""
+class RoutingTierEntrySerializer(serializers.Serializer):  # pylint: disable=abstract-method
+    """One entry of the tier selector (router spec section 6). Never carries a model name."""
 
-    models = LLModelSerializer(many=True)
+    slug = serializers.ChoiceField(choices=[TIER_AUTO, *[tier.value for tier in RoutingTier]])
+    label_key = serializers.CharField(
+        help_text="Translation key of the label, e.g. router.tier.auto."
+    )
+    recommended = serializers.BooleanField(required=False, help_text="Only set on `auto`.")
+    leaves = serializers.IntegerField(
+        required=False, help_text="Ordinal energy pictogram, 1 to 3. Absent on `auto`."
+    )
+    energy_ratio = serializers.FloatField(
+        required=False, help_text="Energy per answer relative to the `simple` tier."
+    )
+
+
+class LLMConfigurationSerializer(serializers.Serializer):  # pylint: disable=abstract-method
+    """Serializer for LLM configuration: the tiers for everyone, the models for staff."""
+
+    mode = serializers.ChoiceField(choices=["tiers"])
+    tiers = RoutingTierEntrySerializer(many=True)
+    models = LLModelSerializer(
+        many=True,
+        required=False,
+        help_text="Raw model list, only for staff with the `dev_model_picker` feature flag.",
+    )
 
 
 class ChatConversationAttachmentSerializer(serializers.ModelSerializer):
