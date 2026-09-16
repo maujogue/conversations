@@ -56,11 +56,13 @@ vi.mock('rehype-katex', () => ({ default: () => {} }));
 vi.mock('remark-gfm', () => ({ default: () => {} }));
 vi.mock('remark-math', () => ({ default: () => {} }));
 
-const arenaFeature = vi.hoisted(() => ({ enabled: false }));
+const arenaFeature = vi.hoisted(() => ({ enabled: false, manual: false }));
 
 vi.mock('@/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/core')>()),
-  useFeatureEnabled: (key: string) => key === 'arena' && arenaFeature.enabled,
+  useFeatureEnabled: (key: string) =>
+    (key === 'arena' && arenaFeature.enabled) ||
+    (key === 'arena-manual' && arenaFeature.manual),
   useConfig: () => ({ data: {} }),
 }));
 vi.mock('@/core/config', async (importOriginal) => ({
@@ -165,6 +167,7 @@ describe('Chat message ownership', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     arenaFeature.enabled = false;
+    arenaFeature.manual = false;
     usePendingChatStore.setState({ input: '', files: null });
     fetchAPIMock.mockImplementation((url: string) => {
       if (url.startsWith('chat-cooldown')) {
@@ -509,5 +512,183 @@ describe('Chat message ownership', () => {
         'Pick the answer you prefer above to continue this conversation.',
       ),
     ).toBeInTheDocument();
+  });
+
+  describe('second opinion', () => {
+    const COMMITTED = [
+      {
+        id: 'server-u1',
+        role: 'user' as const,
+        parts: [{ type: 'text' as const, text: 'An older question' }],
+      },
+      {
+        id: 'trace-a1',
+        role: 'assistant' as const,
+        parts: [{ type: 'text' as const, text: 'The committed answer' }],
+      },
+    ];
+
+    const manualResponses = (
+      manual: () => { ok: boolean; status?: number; payload: unknown },
+      voted: unknown = {
+        messages: [
+          ...COMMITTED.slice(0, 1),
+          {
+            id: 'trace-a2',
+            role: 'assistant' as const,
+            parts: [{ type: 'text' as const, text: 'The second opinion' }],
+          },
+        ],
+        pending_arena_comparison: null,
+      },
+    ) => {
+      fetchAPIMock.mockImplementation((url: string) => {
+        if (url.includes('/arena/manual/')) {
+          const { ok, status, payload } = manual();
+          return Promise.resolve({
+            ok,
+            status,
+            headers: { get: () => null },
+            json: () => Promise.resolve(payload),
+          });
+        }
+        if (url.includes('/vote/')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve(voted),
+          });
+        }
+        if (url.startsWith('chat-cooldown')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ cooldown_seconds: 0 }),
+          });
+        }
+        return Promise.resolve({ ok: true, body: streamOf(ANSWER_STREAM) });
+      });
+    };
+
+    const secondOpinionButton = () =>
+      screen.queryByTestId('second-opinion-button');
+
+    beforeEach(() => {
+      getConversationMock.mockResolvedValue({
+        messages: COMMITTED,
+        pending_arena_comparison: null,
+      });
+    });
+
+    it('offers nothing when the flag is off', async () => {
+      renderChat();
+      await screen.findByText('The committed answer');
+      expect(secondOpinionButton()).not.toBeInTheDocument();
+    });
+
+    it('opens the arena split with the committed answer pre-filled', async () => {
+      arenaFeature.manual = true;
+      manualResponses(() => ({
+        ok: true,
+        payload: { comparison_id: 'cmp-m', side: 'right' },
+      }));
+
+      renderChat();
+      await screen.findByText('The committed answer');
+      await userEvent.click(secondOpinionButton() as HTMLElement);
+
+      const manualCall = await waitFor(() => {
+        const call = fetchAPIMock.mock.calls.find((one) =>
+          String(one[0]).includes('/arena/manual/'),
+        );
+        expect(call).toBeDefined();
+        return call;
+      });
+      expect(String(manualCall?.[0])).toBe('chats/conv-1/arena/manual/');
+      expect(JSON.parse(manualCall?.[1].body as string)).toEqual({
+        message_id: 'trace-a1',
+      });
+
+      // The champion keeps its answer, on the side the backend left free, and
+      // only the challenger column is streamed.
+      const champion = await screen.findByTestId('arena-side-left');
+      expect(champion).toHaveTextContent('The committed answer');
+      await waitFor(() =>
+        expect(screen.getByTestId('arena-side-right')).toHaveTextContent(
+          'An answer.',
+        ),
+      );
+      // The committed answer is not left behind in the conversation flow too.
+      expect(screen.getAllByText('The committed answer')).toHaveLength(1);
+      // Exactly one candidate was generated.
+      expect(chatPostCount(fetchAPIMock)).toBe(1);
+      const stream = fetchAPIMock.mock.calls.find((one) =>
+        String(one[0]).includes('/conversation/'),
+      );
+      expect(String(stream?.[0])).toContain('arena_comparison=cmp-m');
+      expect(String(stream?.[0])).toContain('arena_side=right');
+    });
+
+    it('says so when the tier has no untried model left', async () => {
+      arenaFeature.manual = true;
+      manualResponses(() => ({
+        ok: false,
+        status: 409,
+        payload: { error: 'arena_manual_exhausted' },
+      }));
+
+      renderChat();
+      await screen.findByText('The committed answer');
+      await userEvent.click(secondOpinionButton() as HTMLElement);
+
+      expect(
+        await screen.findByText(
+          'All the other models of this level have already been tried.',
+        ),
+      ).toBeInTheDocument();
+      // Nothing is broken: the answer stays and the button can be used again.
+      expect(screen.getByText('The committed answer')).toBeInTheDocument();
+      expect(screen.queryByTestId('arena-turn')).not.toBeInTheDocument();
+      await waitFor(() => expect(secondOpinionButton()).toBeEnabled());
+    });
+
+    it('reports any other refusal without losing the answer', async () => {
+      arenaFeature.manual = true;
+      manualResponses(() => ({
+        ok: false,
+        status: 409,
+        payload: { error: 'arena_manual_unavailable' },
+      }));
+
+      renderChat();
+      await screen.findByText('The committed answer');
+      await userEvent.click(secondOpinionButton() as HTMLElement);
+
+      expect(
+        await screen.findByText('Another answer could not be started.'),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId('arena-turn')).not.toBeInTheDocument();
+      await waitFor(() => expect(secondOpinionButton()).toBeEnabled());
+    });
+
+    it('can be chained: the button is back on the answer the vote committed', async () => {
+      arenaFeature.manual = true;
+      manualResponses(() => ({
+        ok: true,
+        payload: { comparison_id: 'cmp-m', side: 'right' },
+      }));
+
+      renderChat();
+      await screen.findByText('The committed answer');
+      await userEvent.click(secondOpinionButton() as HTMLElement);
+
+      const vote = await screen.findByRole('button', {
+        name: 'I prefer answer B',
+      });
+      await waitFor(() => expect(vote).toBeEnabled());
+      await userEvent.click(vote);
+
+      expect(await screen.findByText('The second opinion')).toBeInTheDocument();
+      expect(screen.queryByTestId('arena-turn')).not.toBeInTheDocument();
+      await waitFor(() => expect(secondOpinionButton()).toBeInTheDocument());
+    });
   });
 });

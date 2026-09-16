@@ -6,6 +6,7 @@ import { Suspense } from 'react';
 
 import { ToastProvider } from '@/components/ToastProvider';
 import { stampImagesSkippedOnLatestUserMessage } from '@/features/chat/api/useChat';
+import { useChatPreferencesStore } from '@/features/chat/stores/useChatPreferencesStore';
 
 import {
   MessageItem,
@@ -405,6 +406,242 @@ describe('MessageItem', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockConfig.DOCS_BASE_URL = undefined;
+  });
+
+  describe('second opinion button', () => {
+    const lastAnswerProps = {
+      ...defaultProps,
+      isLastMessage: true,
+      isLastAssistantMessage: true,
+    };
+
+    it('is absent when no handler is given (flag off)', async () => {
+      // First render of the suite: the lazy markdown block suspends the item.
+      await act(async () => {
+        renderWithProviders(<MessageItem {...lastAnswerProps} />);
+      });
+      expect(
+        screen.queryByTestId('second-opinion-button'),
+      ).not.toBeInTheDocument();
+    });
+
+    it('is absent on an answer that is not the last message', () => {
+      renderWithProviders(
+        <MessageItem
+          {...defaultProps}
+          isLastMessage={false}
+          isLastAssistantMessage={true}
+          onSecondOpinion={vi.fn()}
+        />,
+      );
+      expect(
+        screen.queryByTestId('second-opinion-button'),
+      ).not.toBeInTheDocument();
+    });
+
+    it('is absent while the answer is still streaming', () => {
+      renderWithProviders(
+        <MessageItem
+          {...lastAnswerProps}
+          status="streaming"
+          onSecondOpinion={vi.fn()}
+        />,
+      );
+      expect(
+        screen.queryByTestId('second-opinion-button'),
+      ).not.toBeInTheDocument();
+    });
+
+    it('is absent on an arena candidate', () => {
+      renderWithProviders(
+        <MessageItem
+          {...lastAnswerProps}
+          hideActions={true}
+          onSecondOpinion={vi.fn()}
+        />,
+      );
+      expect(
+        screen.queryByTestId('second-opinion-button'),
+      ).not.toBeInTheDocument();
+    });
+
+    it('asks for a second opinion on the last answer', async () => {
+      const onSecondOpinion = vi.fn();
+      renderWithProviders(
+        <MessageItem {...lastAnswerProps} onSecondOpinion={onSecondOpinion} />,
+      );
+
+      const button = screen.getByTestId('second-opinion-button');
+      expect(button).toHaveTextContent('Try another answer');
+      await userEvent.click(button);
+      expect(onSecondOpinion).toHaveBeenCalledWith('msg-1');
+    });
+
+    it('waits while a request is in flight', () => {
+      const onSecondOpinion = vi.fn();
+      renderWithProviders(
+        <MessageItem
+          {...lastAnswerProps}
+          onSecondOpinion={onSecondOpinion}
+          secondOpinionPending={true}
+        />,
+      );
+      expect(screen.getByTestId('second-opinion-button')).toBeDisabled();
+    });
+  });
+
+  describe('routing caption', () => {
+    it('shows the live decision above the answer', async () => {
+      useChatPreferencesStore.setState({ hasSeenRouterIntro: true });
+      // First render of the suite: the lazy markdown block suspends the item.
+      await act(async () => {
+        renderWithProviders(
+          <MessageItem
+            {...defaultProps}
+            routing={{ tier: 'complex', tier_source: 'router', changed: true }}
+          />,
+        );
+      });
+
+      const caption = await screen.findByTestId('routing-caption');
+      expect(caption).toHaveAttribute('data-tier-source', 'router');
+      expect(screen.getByTestId('tier-pictogram')).toHaveAttribute(
+        'data-tier',
+        'complex',
+      );
+    });
+
+    it('falls back to the persisted metadata after a reload', () => {
+      useChatPreferencesStore.setState({ hasSeenRouterIntro: true });
+      renderWithProviders(
+        <MessageItem
+          {...defaultProps}
+          message={{
+            ...defaultProps.message,
+            metadata: { tier: 'standard', tier_source: 'user' },
+          }}
+        />,
+      );
+
+      expect(screen.getByTestId('routing-caption')).toHaveAttribute(
+        'data-tier-source',
+        'user',
+      );
+      expect(screen.getByTestId('tier-pictogram')).toHaveAttribute(
+        'data-tier',
+        'standard',
+      );
+    });
+
+    it('shows no caption on an unrouted message', () => {
+      renderWithProviders(<MessageItem {...defaultProps} />);
+      expect(screen.queryByTestId('message-caption')).not.toBeInTheDocument();
+    });
+
+    it('shimmers while the routed answer has no decision yet', () => {
+      renderWithProviders(
+        <MessageItem
+          {...defaultProps}
+          message={{ ...defaultProps.message, parts: [] }}
+          isLastAssistantMessage={true}
+          status="streaming"
+          routingEnabled={true}
+        />,
+      );
+      expect(screen.getByTestId('routing-caption-pending')).toBeInTheDocument();
+    });
+
+    it('does not shimmer when the backend does not route', () => {
+      renderWithProviders(
+        <MessageItem
+          {...defaultProps}
+          message={{ ...defaultProps.message, parts: [] }}
+          isLastAssistantMessage={true}
+          status="streaming"
+        />,
+      );
+      expect(
+        screen.queryByTestId('routing-caption-pending'),
+      ).not.toBeInTheDocument();
+    });
+
+    it('shows the intro once, above the last routed answer', () => {
+      useChatPreferencesStore.setState({ hasSeenRouterIntro: false });
+      renderWithProviders(
+        <MessageItem
+          {...defaultProps}
+          isLastAssistantMessage={true}
+          routing={{ tier: 'simple', tier_source: 'router' }}
+        />,
+      );
+      expect(screen.getByTestId('router-intro')).toBeInTheDocument();
+      expect(useChatPreferencesStore.getState().hasSeenRouterIntro).toBe(true);
+    });
+  });
+
+  describe('reasoning indicator', () => {
+    it('shows the thinking line while reasoning streams before any text', () => {
+      renderWithProviders(
+        <MessageItem
+          {...defaultProps}
+          message={{
+            ...defaultProps.message,
+            parts: [{ type: 'reasoning', text: 'Let me think.' }],
+          }}
+          isLastAssistantMessage={true}
+          status="streaming"
+        />,
+      );
+      expect(
+        screen.getByTestId('reasoning-indicator-thinking'),
+      ).toBeInTheDocument();
+      expect(screen.queryByText('Let me think.')).not.toBeInTheDocument();
+    });
+
+    it('collapses the reasoning behind a toggle once the text is there, out of the copied content', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(
+        <MessageItem
+          {...defaultProps}
+          message={{
+            ...defaultProps.message,
+            parts: [
+              { type: 'reasoning', text: 'Let me think.' },
+              { type: 'text', text: 'Hello world' },
+            ],
+          }}
+        />,
+      );
+
+      expect(
+        screen.queryByTestId('reasoning-indicator-thinking'),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText('Let me think.')).not.toBeInTheDocument();
+
+      await user.click(screen.getByTestId('reasoning-toggle'));
+      expect(screen.getByText('Let me think.')).toBeInTheDocument();
+      expect(
+        screen.getByTestId('assistant-message-content'),
+      ).not.toHaveTextContent('Let me think.');
+    });
+
+    it('shows the persisted duration after a reload', () => {
+      renderWithProviders(
+        <MessageItem
+          {...defaultProps}
+          message={{
+            ...defaultProps.message,
+            metadata: {
+              tier: 'complex',
+              tier_source: 'router',
+              reasoning_seconds: 30,
+            },
+          }}
+        />,
+      );
+      expect(screen.getByTestId('reasoning-label')).toBeInTheDocument();
+      expect(screen.queryByTestId('reasoning-toggle')).not.toBeInTheDocument();
+    });
   });
 
   describe('Edit in Docs button', () => {

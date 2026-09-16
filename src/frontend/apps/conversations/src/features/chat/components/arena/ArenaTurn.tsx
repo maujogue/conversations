@@ -4,12 +4,28 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
 import { Box, Icon, Loader, Text } from '@/components';
-import { ArenaSide, ArenaVote, voteArena } from '@/features/chat/api/useArena';
+import {
+  ArenaAcknowledgement,
+  ArenaSide,
+  ArenaVote,
+  voteArena,
+} from '@/features/chat/api/useArena';
 import { useChat } from '@/features/chat/api/useChat';
 import { getConversation } from '@/features/chat/api/useConversation';
 import { MessageItem } from '@/features/chat/components/MessageItem';
 import { ChatConversation } from '@/features/chat/types';
 import { useResponsiveStore } from '@/stores';
+
+import { prefersReducedMotion } from './ArenaThanks';
+
+/** Spec 11.3: loser fades out in 250 ms, winner grows in 300 ms. */
+const LOSER_FADE_MS = 250;
+const WINNER_GROW_MS = 300;
+/** `transitionend` may never fire (hidden tab, jsdom): fall back to a timer. */
+const TRANSITION_FALLBACK_MS = 320;
+/** `prefers-reduced-motion`: a short cross-fade, no width animation. */
+const REDUCED_MOTION_MS = 150;
+const REDUCED_MOTION_FALLBACK_MS = 170;
 
 export interface ArenaTurnProps {
   conversationId: string;
@@ -20,13 +36,22 @@ export interface ArenaTurnProps {
   /** Conversation history *without* the user message above. */
   history: UIMessage[];
   /**
-   * Answers of a comparison that was left without a vote and is being put back
-   * on screen. When set, nothing is streamed: both answers are already stored
-   * server-side and the vote bar is live right away.
+   * Answers that are already known and must not be streamed. Both sides: a
+   * comparison left without a vote and put back on screen, nothing streams and
+   * the vote bar is live right away. One side: a second opinion (spec 8.2),
+   * where the committed answer is the champion column and only the other one
+   * is generated.
    */
-  restoredAnswers?: { left: UIMessage; right: UIMessage } | null;
-  /** The vote landed: the returned conversation holds the committed answer. */
-  onVoted: (conversation: ChatConversation) => void;
+  restoredAnswers?: { left?: UIMessage; right?: UIMessage } | null;
+  /**
+   * The vote landed and the visual transition is over: the returned
+   * conversation holds the committed answer. `acknowledgement` feeds the
+   * thanks card; `null` when the backend sent none.
+   */
+  onVoted: (
+    conversation: ChatConversation,
+    acknowledgement: ArenaAcknowledgement | null,
+  ) => void;
   /**
    * A side failed and the comparison was abandoned server-side. `null` when
    * the conversation could not be re-read: the parent should reload it.
@@ -86,11 +111,23 @@ export const ArenaTurn = ({
     extraSearchParams: { arena_comparison: comparisonId, arena_side: 'right' },
   });
 
-  const restored = !!restoredAnswers;
+  const prefilledLeft = restoredAnswers?.left;
+  const prefilledRight = restoredAnswers?.right;
+  // A side with no answer yet is the one this client generates: both for a
+  // sampled draw, only the challenger for a second opinion, neither for a
+  // comparison restored after a reload.
+  const streamsLeft = !prefilledLeft;
+  const streamsRight = !prefilledRight;
+  const restored = !streamsLeft && !streamsRight;
   // `status` is `ready` before anything was sent: the buttons must not enable
   // on that initial state. A restored comparison is finished by definition.
   const [started, setStarted] = useState(restored);
   const [voting, setVoting] = useState(false);
+  // The side being voted for, while the loser collapses and the winner grows.
+  const [chosen, setChosen] = useState<ArenaSide | null>(null);
+  const reducedMotion = prefersReducedMotion();
+  // Resolves the pending transition wait when the grid's `transitionend` fires.
+  const transitionDoneRef = useRef<(() => void) | null>(null);
   const sentRef = useRef(false);
   const abandonedRef = useRef(false);
 
@@ -109,18 +146,22 @@ export const ArenaTurn = ({
   callbacksRef.current = { onVoted, onAbandoned, onError, onStreamingChange };
 
   useEffect(() => {
-    if (restored || sentRef.current) {
+    if ((!streamsLeft && !streamsRight) || sentRef.current) {
       return;
     }
     sentRef.current = true;
     const payload = { text: userText, files };
-    void leftRef.current.sendMessage(payload);
-    void rightRef.current.sendMessage(payload);
+    if (streamsLeft) {
+      void leftRef.current.sendMessage(payload);
+    }
+    if (streamsRight) {
+      void rightRef.current.sendMessage(payload);
+    }
     setStarted(true);
-  }, [userText, files, restored]);
+  }, [userText, files, streamsLeft, streamsRight]);
 
-  const leftStatus: SideStatus = restored ? 'ready' : left.status;
-  const rightStatus: SideStatus = restored ? 'ready' : right.status;
+  const leftStatus: SideStatus = streamsLeft ? left.status : 'ready';
+  const rightStatus: SideStatus = streamsRight ? right.status : 'ready';
   const anyPending = isPending(leftStatus) || isPending(rightStatus);
   const anyErrored = leftStatus === 'error' || rightStatus === 'error';
   const bothReady =
@@ -142,7 +183,11 @@ export const ArenaTurn = ({
     const abandon = async () => {
       let conversation: ChatConversation | null = null;
       try {
-        conversation = await voteArena(conversationId, comparisonId, null);
+        ({ conversation } = await voteArena(
+          conversationId,
+          comparisonId,
+          null,
+        ));
       } catch {
         // Already closed server-side (errored path): re-read the conversation.
         try {
@@ -156,15 +201,44 @@ export const ArenaTurn = ({
     void abandon();
   }, [started, anyErrored, anyPending, conversationId, comparisonId]);
 
+  /**
+   * Resolves once the column transition is over: on the grid's
+   * `transitionend`, or after a timer in case the event never comes.
+   */
+  const waitForTransition = () =>
+    new Promise<void>((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        transitionDoneRef.current = null;
+        resolve();
+      };
+      const timer = setTimeout(
+        finish,
+        reducedMotion ? REDUCED_MOTION_FALLBACK_MS : TRANSITION_FALLBACK_MS,
+      );
+      transitionDoneRef.current = finish;
+    });
+
   const vote = async (side: ArenaVote) => {
     if (!bothReady || voting) {
       return;
     }
+    // Hide the bar and lock the columns right away; the chosen column moves
+    // while the vote is recorded. `onVoted` waits for both so the parent swaps
+    // in the committed message after the visual move, never before.
     setVoting(true);
+    const picked = side === 'left' || side === 'right' ? side : null;
+    setChosen(picked);
+    const settled = picked ? waitForTransition() : Promise.resolve();
     try {
-      const conversation = await voteArena(conversationId, comparisonId, side);
-      callbacksRef.current.onVoted(conversation);
+      const [result] = await Promise.all([
+        voteArena(conversationId, comparisonId, side),
+        settled,
+      ]);
+      callbacksRef.current.onVoted(result.conversation, result.acknowledgement);
     } catch (error) {
+      transitionDoneRef.current?.();
+      setChosen(null);
       setVoting(false);
       callbacksRef.current.onError?.(error as Error);
     }
@@ -177,17 +251,22 @@ export const ArenaTurn = ({
     caption: string,
   ) => {
     // The candidate is the assistant message appended after the user message,
-    // or the stored one when the comparison is being restored.
+    // or the answer this side was given (restored comparison, or the committed
+    // champion of a second opinion) when it is not being streamed here.
     const last = chat.messages.at(-1);
-    const candidate = restoredAnswers
-      ? restoredAnswers[side]
-      : chat.messages.length > history.length + 1 && last?.role === 'assistant'
+    const prefilled = side === 'left' ? prefilledLeft : prefilledRight;
+    const candidate =
+      prefilled ??
+      (chat.messages.length > history.length + 1 && last?.role === 'assistant'
         ? last
-        : undefined;
+        : undefined);
     const showThinking =
       started && isPending(status) && (!candidate || status === 'submitted');
 
     const clickable = bothReady && !voting;
+    const isLoser = chosen !== null && chosen !== side;
+    const isWinner = chosen === side;
+    const fadeMs = reducedMotion ? REDUCED_MOTION_MS : LOSER_FADE_MS;
     // Clicking anywhere on an answer votes for it, like LM Arena. Clicks on
     // interactive content (links, code copy buttons) and text selections are
     // left alone.
@@ -217,9 +296,22 @@ export const ArenaTurn = ({
         $padding={{ vertical: '12px' }}
         $css={`
           min-width: 0;
+          overflow: hidden;
+          ${isMobile ? 'max-height: calc(60vh + 80px);' : ''}
           transition:
             border-color 0.15s ease,
-            box-shadow 0.15s ease;
+            box-shadow 0.15s ease,
+            opacity ${fadeMs}ms ease-out,
+            max-height ${fadeMs}ms ease-out,
+            padding ${fadeMs}ms ease-out;
+          ${
+            isLoser
+              ? `
+          opacity: 0;
+          pointer-events: none;
+          ${isMobile && !reducedMotion ? 'max-height: 0; padding: 0; border-color: transparent;' : ''}`
+              : ''
+          }
           ${
             clickable
               ? `
@@ -232,8 +324,10 @@ export const ArenaTurn = ({
           }
         `}
         data-testid={`arena-side-${side}`}
+        data-arena-state={isLoser ? 'loser' : isWinner ? 'winner' : undefined}
         role="group"
         aria-label={caption}
+        aria-hidden={isLoser || undefined}
         title={clickable ? t('Click to pick this answer') : undefined}
         onClick={handleClick}
       >
@@ -244,6 +338,10 @@ export const ArenaTurn = ({
           $size="sm"
           $weight="700"
           $margin={{ all: '0', left: '12px' }}
+          $css={`
+            transition: opacity ${fadeMs}ms ease;
+            ${isWinner ? 'opacity: 0;' : ''}
+          `}
         >
           {caption}
         </Text>
@@ -346,7 +444,7 @@ export const ArenaTurn = ({
           font-size: 15px;
           line-height: 1;
           white-space: nowrap;
-          color: var(--c--contextuals--content--surface--primary, #1f1f1f);
+          color: var(--c--contextuals--content--semantic--neutral--primary, #1f1f1f);
           background: var(--c--contextuals--background--surface--primary, #ffffff);
           border: 1px solid var(--c--contextuals--border--surface--primary, #dcdad5);
           border-radius: 8px;
@@ -392,6 +490,17 @@ export const ArenaTurn = ({
     </Box>
   );
 
+  // Desktop: the chosen column grows to the full width while the other one
+  // shrinks to nothing (`minmax(0, ...)` lets the loser really reach 0).
+  // Reduced motion keeps the widths: only the loser cross-fades.
+  const gridColumns = isMobile
+    ? '1fr'
+    : chosen && !reducedMotion
+      ? chosen === 'left'
+        ? 'minmax(0, 1fr) minmax(0, 0fr)'
+        : 'minmax(0, 0fr) minmax(0, 1fr)'
+      : 'minmax(0, 1fr) minmax(0, 1fr)';
+
   return (
     <Box
       data-testid="arena-turn"
@@ -400,17 +509,33 @@ export const ArenaTurn = ({
       $margin={{ all: 'auto', top: 'base', bottom: 'md' }}
     >
       <Box
+        data-testid="arena-split"
+        onTransitionEnd={(event) => {
+          if (
+            event.target === event.currentTarget &&
+            event.propertyName === 'grid-template-columns'
+          ) {
+            transitionDoneRef.current?.();
+          }
+        }}
         $css={`
           display: grid;
-          grid-template-columns: ${isMobile ? '1fr' : '1fr 1fr'};
-          gap: 1rem;
+          grid-template-columns: ${gridColumns};
+          gap: ${chosen && !isMobile && !reducedMotion ? '0' : '1rem'};
           align-items: start;
+          ${
+            reducedMotion
+              ? ''
+              : `transition:
+            grid-template-columns ${WINNER_GROW_MS}ms ease,
+            gap ${WINNER_GROW_MS}ms ease;`
+          }
         `}
       >
         {renderSide('left', left, leftStatus, t('Answer A'))}
         {renderSide('right', right, rightStatus, t('Answer B'))}
       </Box>
-      {voteBarContainer ? (
+      {voting ? null : voteBarContainer ? (
         createPortal(voteBar, voteBarContainer)
       ) : (
         // No slot outside the scroll area was provided (e.g. standalone

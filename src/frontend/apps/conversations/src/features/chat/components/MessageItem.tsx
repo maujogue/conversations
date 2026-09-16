@@ -12,9 +12,9 @@ import { useTranslation } from 'react-i18next';
 import CheckmarkIcon from '@/assets/icons/uikit-custom/checkmark.svg?react';
 import ClipboardIcon from '@/assets/icons/uikit-custom/clipboard.svg?react';
 import SourcesIcon from '@/assets/icons/uikit-custom/sources.svg?react';
-import { Box, Loader, Text } from '@/components';
+import { Box, Icon, Loader, Text } from '@/components';
 import { useConfig } from '@/core/config';
-import { SkippableFileUIPart } from '@/features/chat/api/useChat';
+import { RoutingEvent, SkippableFileUIPart } from '@/features/chat/api/useChat';
 import { AttachmentList } from '@/features/chat/components/AttachmentList';
 import { FeedbackButtons } from '@/features/chat/components/FeedbackButtons';
 import {
@@ -23,10 +23,18 @@ import {
 } from '@/features/chat/components/MessageBlock';
 import { MessageEnergyIndicator } from '@/features/chat/components/MessageEnergyIndicator';
 import { MoreActionsButton } from '@/features/chat/components/MoreActionsButton';
+import { ReasoningIndicator } from '@/features/chat/components/ReasoningIndicator';
+import { RouterIntro } from '@/features/chat/components/RouterIntro';
+import { RoutingCaption } from '@/features/chat/components/RoutingCaption';
 import { SummarizationError } from '@/features/chat/components/SummarizationError';
 import { SummarizationProgress } from '@/features/chat/components/SummarizationProgress';
 import { ToolInvocationItem } from '@/features/chat/components/ToolInvocationItem';
+import { WastefulPinHint } from '@/features/chat/components/WastefulPinHint';
 import { getMessageCo2Impact } from '@/features/chat/utils/getMessageCo2Impact';
+import {
+  getMessageReasoningSeconds,
+  getMessageRouting,
+} from '@/features/chat/utils/getMessageRouting';
 import { getMessageText } from '@/features/chat/utils/getMessageText';
 
 import { ChatErrorType } from './ChatError';
@@ -210,6 +218,28 @@ export interface MessageItemProps {
   onOpenSources: (messageId: string) => void;
   /** Hide the bottom action bar (copy, actions, sources, energy, feedback). */
   hideActions?: boolean;
+  /** The router's live decision for this turn (spec 7.1), when streamed. */
+  routing?: RoutingEvent;
+  /**
+   * The backend routes this conversation's turns: a streaming answer with no
+   * decision yet shows the "Choosing the model…" shimmer.
+   */
+  routingEnabled?: boolean;
+  /**
+   * Show the "Auto would have been enough" hint under this answer's caption
+   * (spec 5.3). Only ever set on the last assistant message.
+   */
+  showAutoHint?: boolean;
+  /** Handler of the hint's "Back to Auto" link. */
+  onReturnToAuto?: () => void;
+  /**
+   * Run a second opinion on this answer (router spec 8.2). Absent when the
+   * `arena-manual` flag is off or a comparison is already on screen: the
+   * button is then not rendered at all. Only ever offered on the last answer.
+   */
+  onSecondOpinion?: (messageId: string) => void;
+  /** A second opinion is being set up: the button waits instead of firing twice. */
+  secondOpinionPending?: boolean;
 }
 
 const MessageItemComponent: React.FC<MessageItemProps> = ({
@@ -226,6 +256,12 @@ const MessageItemComponent: React.FC<MessageItemProps> = ({
   onCopyToClipboard,
   onOpenSources,
   hideActions = false,
+  routing,
+  routingEnabled = false,
+  showAutoHint = false,
+  onReturnToAuto,
+  onSecondOpinion,
+  secondOpinionPending = false,
 }) => {
   const { t } = useTranslation();
   const { data: config } = useConfig();
@@ -295,6 +331,21 @@ const MessageItemComponent: React.FC<MessageItemProps> = ({
 
   const hasTextContent = textContent.trim().length > 0;
 
+  // Reasoning models stream `reasoning` parts before any text (spec 7.2).
+  const reasoningText = React.useMemo(
+    () => getReasoningText(message),
+    [message],
+  );
+  const reasoningSeconds = getMessageReasoningSeconds(message);
+  const isThinking =
+    isCurrentlyStreaming && reasoningText.length > 0 && !hasTextContent;
+  const hasReasoning =
+    reasoningText.length > 0 || reasoningSeconds !== undefined;
+
+  // The Auto decision (spec 7.1): live event first, persisted metadata after
+  // a reload.
+  const routingInfo = getMessageRouting(message, routing);
+
   // v5 creates the assistant message as soon as the response starts, before any
   // content has arrived. That empty bubble must not carry the copy/feedback bar:
   // it put the thumbs up/down on screen ahead of the answer.
@@ -303,6 +354,18 @@ const MessageItemComponent: React.FC<MessageItemProps> = ({
     message.parts.some(
       (part) => part.type !== 'text' && part.type !== 'step-start',
     );
+
+  // The router runs before the first token: until its decision lands, the
+  // caption slot shimmers instead of standing empty.
+  const isRoutingPending =
+    routingEnabled &&
+    message.role === 'assistant' &&
+    isCurrentlyStreaming &&
+    !routingInfo &&
+    !hasAssistantOutput;
+  const showCaption =
+    message.role === 'assistant' &&
+    (!!routingInfo || isRoutingPending || hasReasoning);
 
   const hasNonDocumentParsingTool = React.useMemo(
     () =>
@@ -408,6 +471,19 @@ const MessageItemComponent: React.FC<MessageItemProps> = ({
     onOpenSources(message.id);
   }, [onOpenSources, message.id]);
 
+  const handleSecondOpinion = React.useCallback(() => {
+    onSecondOpinion?.(message.id);
+  }, [onSecondOpinion, message.id]);
+
+  // Spec 8.2: only the last answer of the conversation, and only once it is
+  // written, can be put up against another model of its tier.
+  const showSecondOpinion =
+    !!onSecondOpinion &&
+    !hideActions &&
+    isLastAssistantMessage &&
+    isLastMessage &&
+    !isCurrentlyStreaming;
+
   return (
     <Box
       data-message-id={message.id}
@@ -444,6 +520,31 @@ const MessageItemComponent: React.FC<MessageItemProps> = ({
               : undefined
           }
         >
+          {showCaption && (
+            <Box
+              $direction="column"
+              $align="flex-start"
+              $gap="4px"
+              $margin={{ bottom: '6px' }}
+              data-testid="message-caption"
+            >
+              {routingInfo && isLastAssistantMessage && <RouterIntro />}
+              <RoutingCaption
+                routing={routingInfo}
+                pending={isRoutingPending}
+              />
+              {showAutoHint && isLastAssistantMessage && onReturnToAuto && (
+                <WastefulPinHint onReturnToAuto={onReturnToAuto} />
+              )}
+              {(isThinking || hasReasoning) && (
+                <ReasoningIndicator
+                  thinking={isThinking}
+                  reasoningText={reasoningText}
+                  persistedSeconds={reasoningSeconds}
+                />
+              )}
+            </Box>
+          )}
           {/* Message content */}
           {textContent && (
             <Box
@@ -629,6 +730,29 @@ const MessageItemComponent: React.FC<MessageItemProps> = ({
                       </Text>
                     </Button>
                   )}
+                  {showSecondOpinion && (
+                    <Button
+                      size="nano"
+                      variant="tertiary"
+                      color="neutral"
+                      disabled={secondOpinionPending}
+                      onClick={handleSecondOpinion}
+                      data-testid="second-opinion-button"
+                      icon={
+                        <Icon
+                          iconName="compare_arrows"
+                          $size="16px"
+                          $theme="greyscale"
+                          $variation="600"
+                        />
+                      }
+                      className="c__button--neutral action-chat-button"
+                    >
+                      <Text $theme="neutral" $variation="tertiary">
+                        {t('Try another answer')}
+                      </Text>
+                    </Button>
+                  )}
                 </Box>
                 <Box $direction="row" $gap="4px" $align="center">
                   {co2ImpactKg !== undefined && (
@@ -650,6 +774,21 @@ const MessageItemComponent: React.FC<MessageItemProps> = ({
 };
 
 MessageItemComponent.displayName = 'MessageItem';
+
+/** The reasoning streamed so far, assembled from the `reasoning` parts. */
+const getReasoningText = (message: UIMessage): string =>
+  message.parts
+    .filter((part) => part.type === 'reasoning')
+    .map((part) => part.text)
+    .join('');
+
+// Router fields of the persisted metadata that drive the caption.
+const getRoutingSignature = (message: UIMessage): string => {
+  const routing = getMessageRouting(message);
+  return `${routing?.tier ?? ''}|${routing?.tier_source ?? ''}|${
+    getMessageReasoningSeconds(message) ?? ''
+  }`;
+};
 
 // Tool invocations advance through their states in place, without changing the
 // parts count, so their states need their own signature: the summarization
@@ -694,6 +833,36 @@ const arePropsEqual = (
     getMessageCo2Impact(prevProps.message) !==
     getMessageCo2Impact(nextProps.message)
   ) {
+    return false;
+  }
+  if (
+    getRoutingSignature(prevProps.message) !==
+    getRoutingSignature(nextProps.message)
+  ) {
+    return false;
+  }
+  // Reasoning deltas grow the part in place: the parts count does not move.
+  if (
+    getReasoningText(prevProps.message) !== getReasoningText(nextProps.message)
+  ) {
+    return false;
+  }
+  if (prevProps.routing !== nextProps.routing) {
+    return false;
+  }
+  if (prevProps.routingEnabled !== nextProps.routingEnabled) {
+    return false;
+  }
+  if (prevProps.showAutoHint !== nextProps.showAutoHint) {
+    return false;
+  }
+  if (prevProps.onReturnToAuto !== nextProps.onReturnToAuto) {
+    return false;
+  }
+  if (prevProps.onSecondOpinion !== nextProps.onSecondOpinion) {
+    return false;
+  }
+  if (prevProps.secondOpinionPending !== nextProps.secondOpinionPending) {
     return false;
   }
 

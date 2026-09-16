@@ -27,12 +27,24 @@ import {
   isRateLimitError,
   rateLimitMessage,
 } from '@/api';
-import { Box, HorizontalSeparator, Icon, Loader, Text } from '@/components';
+import {
+  Box,
+  HorizontalSeparator,
+  Icon,
+  Loader,
+  Text,
+  useToast,
+} from '@/components';
 import { useConfig, useFeatureEnabled } from '@/core';
 import { useProjectAttachments } from '@/features/attachments/api/useProjectAttachments';
 import { useReindexProjectAttachment } from '@/features/attachments/api/useReindexProjectAttachment';
 import { useUploadFile } from '@/features/attachments/hooks/useUploadFile';
-import { drawArena } from '@/features/chat/api/useArena';
+import {
+  ArenaAcknowledgement,
+  ArenaManualError,
+  drawArena,
+  requestManualArena,
+} from '@/features/chat/api/useArena';
 import {
   ImagesSkippedEventKind,
   stampImagesSkippedOnLatestUserMessage,
@@ -45,6 +57,7 @@ import {
 import { useCreateChatConversation } from '@/features/chat/api/useCreateConversation';
 import {
   LLMModel,
+  TierSlug,
   useLLMConfiguration,
 } from '@/features/chat/api/useLLMConfiguration';
 import {
@@ -55,8 +68,10 @@ import { ChatError, ChatErrorType } from '@/features/chat/components/ChatError';
 import { ImageProcessingUnavailableBanner } from '@/features/chat/components/ImageProcessingUnavailableBanner';
 import { InputChat } from '@/features/chat/components/InputChat';
 import { MessageItem } from '@/features/chat/components/MessageItem';
+import { RoutingCaption } from '@/features/chat/components/RoutingCaption';
 import { SourceItemList } from '@/features/chat/components/SourceItemList';
 import { ArenaIntro } from '@/features/chat/components/arena/ArenaIntro';
+import { ArenaThanks } from '@/features/chat/components/arena/ArenaThanks';
 import { ArenaTurn } from '@/features/chat/components/arena/ArenaTurn';
 import {
   STATUS_LINK_KINDS,
@@ -69,6 +84,7 @@ import { useResponsiveStore } from '@/stores';
 
 import { useSourceMetadataCache } from '../hooks';
 import { useAprilFools } from '../hooks/useAprilFools';
+import { useWastefulPinHint } from '../hooks/useWastefulPinHint';
 import { useChatPreferencesStore } from '../stores/useChatPreferencesStore';
 import { usePendingChatStore } from '../stores/usePendingChatStore';
 import { useScrollStore } from '../stores/useScrollStore';
@@ -119,12 +135,17 @@ export const Chat = ({
     toggleForceWebSearch,
     selectedModelHrid,
     setSelectedModelHrid,
+    selectedTier,
+    setSelectedTier,
     setSourcesPanelOpen,
   } = useChatPreferencesStore();
 
   const { data: llmConfig } = useLLMConfiguration();
-  const [selectedModel, setSelectedModel] = useState<LLMModel | null>(null);
+  // Router tiers announced by the backend; absent on the pre-router shape.
+  const hasTiers = !!llmConfig?.tiers?.length;
+  const { showToast } = useToast();
   const arenaEnabled = useFeatureEnabled('arena');
+  const arenaManualEnabled = useFeatureEnabled('arena-manual');
   // The arena turn in progress: two candidate answers are streamed by
   // `ArenaTurn` instead of the main chat, until the user votes. A comparison
   // left without a vote stays open: reopening the conversation puts it back on
@@ -134,9 +155,22 @@ export const Chat = ({
     userText: string;
     files: FileUIPart[];
     userMessageId: string;
-    restoredAnswers?: { left: ChatMessage; right: ChatMessage };
+    restoredAnswers?: { left?: ChatMessage; right?: ChatMessage };
+    /**
+     * Second opinion (spec 8.2): the committed answer stands as one side of
+     * the split, so it is taken out of the conversation flow while the
+     * challenger streams in the other column.
+     */
+    championMessageId?: string;
   } | null>(null);
+  // A second opinion is being requested: the button waits for the endpoint.
+  const [secondOpinionPending, setSecondOpinionPending] = useState(false);
   const [arenaStreaming, setArenaStreaming] = useState(false);
+  // Figures of the last vote, shown in the thanks card under the committed
+  // answer once `ArenaTurn` is gone; cleared when the card has collapsed.
+  const [arenaThanks, setArenaThanks] = useState<ArenaAcknowledgement | null>(
+    null,
+  );
   // Slot rendered next to `InputChat`, outside the scrollable message area,
   // so the arena vote bar (portalled into it) never scrolls with the chat.
   const [arenaVoteBarContainer, setArenaVoteBarContainer] =
@@ -157,33 +191,29 @@ export const Chat = ({
       forceWebSearch;
   }, [forceWebSearch]);
 
-  // Update selected model when LLM config loads
+  // The debug model pin is persisted, but `model_hrid` is only accepted for
+  // staff with the dev picker flag: drop a pin the configuration no longer
+  // lists (flag turned off, model gone, or a leftover from before the router)
+  // so the request falls back to the tier.
   useEffect(() => {
-    if (llmConfig?.models && !selectedModel) {
-      let modelToSelect: LLMModel | undefined;
-
-      if (selectedModelHrid) {
-        // Try to find the previously selected model
-        modelToSelect = llmConfig.models.find(
-          (model) =>
-            model.hrid === selectedModelHrid && model.is_active !== false,
-        );
-      }
-
-      // If no saved model or saved model not found/inactive, use default
-      if (!modelToSelect) {
-        modelToSelect = llmConfig.models.find((model) => model.is_default);
-      }
-
-      if (modelToSelect) {
-        setSelectedModel(modelToSelect);
-        setSelectedModelHrid(modelToSelect.hrid);
-      }
+    if (!llmConfig || !selectedModelHrid) {
+      return;
     }
-  }, [llmConfig, selectedModel, selectedModelHrid, setSelectedModelHrid]);
+    const stillListed = llmConfig.models?.some(
+      (model) => model.hrid === selectedModelHrid && model.is_active !== false,
+    );
+    if (!stillListed) {
+      setSelectedModelHrid(null);
+    }
+  }, [llmConfig, selectedModelHrid, setSelectedModelHrid]);
 
-  const handleModelSelect = (model: LLMModel) => {
-    setSelectedModel(model);
+  const handleTierSelect = (tier: TierSlug) => {
+    setSelectedTier(tier);
+    // A tier choice releases the debug model pin.
+    setSelectedModelHrid(null);
+  };
+
+  const handleDebugModelSelect = (model: LLMModel) => {
     setSelectedModelHrid(model.hrid);
   };
 
@@ -386,6 +416,7 @@ export const Chat = ({
     stop: stopChat,
     setMessages,
     cooldownUntil,
+    routingByMessageId,
   } = useChat({
     // `useChat` rebuilds the chat whenever its id differs from the instance's,
     // and an instance with no id gets a generated one - so `undefined` never
@@ -396,6 +427,13 @@ export const Chat = ({
     onError: onErrorChat,
     onImagesSkipped,
   });
+
+  // The second-opinion handler must stay stable (it is handed to every
+  // memoized `MessageItem`), so it reads the live message list through a ref
+  // instead of closing over it.
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const secondOpinionPendingRef = useRef(false);
 
   const stopGeneration = async () => {
     await stopChat();
@@ -549,6 +587,14 @@ export const Chat = ({
       <SourceItemList parts={selectedSourceParts} getMetadata={getMetadata} />
     </Box>
   ) : null;
+
+  // The "Auto would have been enough" hint (spec 5.3), counted over this
+  // conversation's answers and shown under the last one's caption.
+  const { showHint: showAutoHint, returnToAuto } = useWastefulPinHint({
+    conversationId,
+    messages,
+    routingByMessageId,
+  });
 
   // Memoize the last assistant message index to avoid recalculating in render
   const lastAssistantMessageIndex = useMemo(() => {
@@ -834,6 +880,10 @@ export const Chat = ({
     // reset would wipe the project it just assigned.
     if (!(initialConversationId && pendingInput)) {
       setConversationProjectId(null);
+      // A tier choice applies to one conversation: back to Auto on another
+      // one (or on the new-chat screen). Kept across the creation handoff so
+      // the tier picked before the first message travels with it.
+      setSelectedTier('auto');
     }
     let dismissedFromStorage = false;
     if (initialConversationId && typeof window !== 'undefined') {
@@ -991,12 +1041,16 @@ export const Chat = ({
   // The split collapses into a normal message: take the server's messages
   // (the committed answer among them) and move focus onto it.
   const finishArena = useCallback(
-    (conversation: ChatConversation | null) => {
+    (
+      conversation: ChatConversation | null,
+      acknowledgement: ArenaAcknowledgement | null = null,
+    ) => {
       if (conversation) {
         setMessages(conversation.messages);
       }
       setArena(null);
       setArenaStreaming(false);
+      setArenaThanks(acknowledgement);
       void queryClient.invalidateQueries({
         queryKey: [KEY_CONVERSATION, conversationId],
       });
@@ -1031,6 +1085,67 @@ export const Chat = ({
       });
     },
     [t],
+  );
+
+  // Spec 8.2: the committed answer becomes one side of a new comparison and
+  // the backend names the side this client has to stream. The existing arena
+  // split is reused as is, with the answer already on screen pre-filled into
+  // the champion column, so only the challenger is generated.
+  const handleSecondOpinion = useCallback(
+    (messageId: string) => {
+      if (!conversationId || secondOpinionPendingRef.current) {
+        return;
+      }
+      secondOpinionPendingRef.current = true;
+      setSecondOpinionPending(true);
+      const run = async () => {
+        try {
+          const { comparison_id, side } = await requestManualArena(
+            conversationId,
+            messageId,
+          );
+          const current = messagesRef.current;
+          const index = current.findIndex((m) => m.id === messageId);
+          const champion = index === -1 ? undefined : current[index];
+          const question = current
+            .slice(0, index === -1 ? 0 : index)
+            .reverse()
+            .find((m) => m.role === 'user');
+          if (!champion || !question) {
+            // The conversation moved under us: nothing to compare any more.
+            showToast('error', t('Another answer could not be started.'));
+            return;
+          }
+          // `side` is the challenger's: the champion takes the other column.
+          const championSide = side === 'left' ? 'right' : 'left';
+          setArenaThanks(null);
+          setArena({
+            comparisonId: comparison_id,
+            userText: messageText(question),
+            files: [],
+            userMessageId: question.id,
+            championMessageId: champion.id,
+            restoredAnswers: { [championSide]: champion },
+          });
+        } catch (error) {
+          const code =
+            error instanceof ArenaManualError
+              ? error.code
+              : 'arena_manual_failed';
+          showToast(
+            'info',
+            code === 'arena_manual_exhausted'
+              ? t('All the other models of this level have already been tried.')
+              : t('Another answer could not be started.'),
+          );
+        } finally {
+          secondOpinionPendingRef.current = false;
+          setSecondOpinionPending(false);
+        }
+      };
+      void run();
+    },
+    [conversationId, showToast, t],
   );
 
   const send = async (
@@ -1257,7 +1372,12 @@ export const Chat = ({
   // arena turn answers (each candidate chat appends its own copy of it).
   const arenaHistory = useMemo(
     () =>
-      arena ? messages.filter((m) => m.id !== arena.userMessageId) : messages,
+      arena
+        ? messages.filter(
+            (m) =>
+              m.id !== arena.userMessageId && m.id !== arena.championMessageId,
+          )
+        : messages,
     [messages, arena],
   );
 
@@ -1297,10 +1417,13 @@ export const Chat = ({
                 aprilFools.isActive &&
                 message.role === 'assistant' &&
                 index === messages.length - 1;
+              // The champion of a second opinion is rendered inside the split
+              // instead, so it must not also stand in the conversation flow.
+              const movedIntoArena = arena?.championMessageId === message.id;
 
               return (
                 <React.Fragment key={message.id}>
-                  {hideAssistant ? null : (
+                  {hideAssistant || movedIntoArena ? null : (
                     <MessageItem
                       message={message}
                       isLastMessage={index === messages.length - 1}
@@ -1318,6 +1441,16 @@ export const Chat = ({
                       isMobile={isMobile}
                       onCopyToClipboard={copyToClipboard}
                       onOpenSources={openSources}
+                      routing={routingByMessageId[message.id]}
+                      routingEnabled={hasTiers && !selectedModelHrid}
+                      showAutoHint={showAutoHint}
+                      onReturnToAuto={returnToAuto}
+                      onSecondOpinion={
+                        arenaManualEnabled && !arena
+                          ? handleSecondOpinion
+                          : undefined
+                      }
+                      secondOpinionPending={secondOpinionPending}
                     />
                   )}
                   {/* Inject the prank right after the last user message */}
@@ -1345,6 +1478,12 @@ export const Chat = ({
               );
             })}
           </Box>
+        )}
+        {!arena && arenaThanks && (
+          <ArenaThanks
+            acknowledgement={arenaThanks}
+            onDone={() => setArenaThanks(null)}
+          />
         )}
         {arena && conversationId && (
           <>
@@ -1381,15 +1520,24 @@ export const Chat = ({
               ${streamingMessageHeight ? `min-height: ${streamingMessageHeight}px;` : 'auto'}
             `}
           >
-            <Loader />
-            <Text $theme="neutral" $variation="tertiary" $size="md">
-              {(() => {
-                if (isUploadingFiles) return t('Uploading files...');
-                if (isReadingInstructions)
-                  return t('Reading project instructions...');
-                return t('Thinking...');
-              })()}
-            </Text>
+            {hasTiers &&
+            !isUploadingFiles &&
+            !isReadingInstructions &&
+            !selectedModelHrid ? (
+              <RoutingCaption pending />
+            ) : (
+              <>
+                <Loader />
+                <Text $theme="neutral" $variation="tertiary" $size="md">
+                  {(() => {
+                    if (isUploadingFiles) return t('Uploading files...');
+                    if (isReadingInstructions)
+                      return t('Reading project instructions...');
+                    return t('Thinking...');
+                  })()}
+                </Text>
+              </>
+            )}
           </Box>
         ) : null}
         {status === 'error' &&
@@ -1439,8 +1587,10 @@ export const Chat = ({
           onStop={handleStop}
           forceWebSearch={forceWebSearch}
           onToggleWebSearch={toggleWebSearch}
-          selectedModel={selectedModel}
-          onModelSelect={handleModelSelect}
+          selectedTier={selectedTier}
+          onTierSelect={handleTierSelect}
+          selectedModelHrid={selectedModelHrid}
+          onModelSelect={handleDebugModelSelect}
           isUploadingFiles={isUploadingFiles}
           isIndexingFiles={isIndexingFiles}
           failedIndexingCount={failedIndexingIds.length}

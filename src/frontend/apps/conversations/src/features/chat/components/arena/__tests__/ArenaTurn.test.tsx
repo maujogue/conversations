@@ -3,12 +3,19 @@ import { TextDecoder, TextEncoder } from 'node:util';
 import { deserialize, serialize } from 'node:v8';
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { UIMessage } from 'ai';
 import type { Mock } from 'vitest';
 
 import { fetchAPI } from '@/api';
+import { ArenaAcknowledgement } from '@/features/chat/api/useArena';
 
 import { ArenaTurn } from '../ArenaTurn';
 
@@ -115,6 +122,58 @@ const renderTurn = (props: Partial<React.ComponentProps<typeof ArenaTurn>>) =>
     </QueryClientProvider>,
   );
 
+const ACK: ArenaAcknowledgement = {
+  user_votes: 7,
+  experiment_votes: 1342,
+  tier_label: 'router.tier.standard',
+  task_label: 'router.task.writing',
+  domain_label: 'router.domain.administrative',
+  milestone: null,
+};
+
+const RESTORED = {
+  left: {
+    id: 'a1',
+    role: 'assistant' as const,
+    parts: [{ type: 'text' as const, text: 'Stored left answer' }],
+  },
+  right: {
+    id: 'a2',
+    role: 'assistant' as const,
+    parts: [{ type: 'text' as const, text: 'Stored right answer' }],
+  },
+};
+
+/** Answer the cooldown probe and the vote; nothing else may be called. */
+const mockRestoredVote = (
+  fetchAPIMock: Mock,
+  voteBody: unknown = CONVERSATION,
+) => {
+  fetchAPIMock.mockImplementation((url: string) => {
+    if (url.startsWith('chat-cooldown')) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ cooldown_seconds: 0 }),
+      });
+    }
+    if (url.includes('/arena/')) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(voteBody),
+      });
+    }
+    throw new Error(`unexpected call to ${url}`);
+  });
+};
+
+/** Let the vote request and its `.json()` settle under fake timers. */
+const flushPromises = () =>
+  act(async () => {
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+    }
+  });
+
 const voteButtons = () => ({
   left: screen.getByRole('button', { name: 'I prefer answer A' }),
   right: screen.getByRole('button', { name: 'I prefer answer B' }),
@@ -194,6 +253,45 @@ describe('ArenaTurn', () => {
     expect(voteButtons().right).toBeEnabled();
   });
 
+  it('streams only the challenger when one side is already answered', async () => {
+    // Second opinion (spec 8.2): the committed answer is handed in as the
+    // champion column, so a single stream is opened, for the other side.
+    const chatCalls: string[] = [];
+    fetchAPIMock.mockImplementation((url: string) => {
+      if (url.startsWith('chat-cooldown')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ cooldown_seconds: 0 }),
+        });
+      }
+      chatCalls.push(url);
+      return Promise.resolve({
+        ok: true,
+        body: streamOf(answerStream('The challenger answer')),
+      });
+    });
+
+    renderTurn({
+      restoredAnswers: {
+        left: {
+          id: 'committed',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'The committed answer' }],
+        },
+      },
+    });
+
+    expect(screen.getByText('The committed answer')).toBeInTheDocument();
+    expect(
+      await screen.findByText('The challenger answer'),
+    ).toBeInTheDocument();
+    expect(chatCalls).toEqual([
+      'chats/conv-1/conversation/?arena_comparison=cmp-1&arena_side=right',
+    ]);
+    await waitFor(() => expect(voteButtons().left).toBeEnabled());
+    expect(voteButtons().right).toBeEnabled();
+  });
+
   it('keeps both vote buttons disabled until both sides are ready', async () => {
     const held = heldStream(answerStream('Right answer'));
     fetchAPIMock.mockImplementation((url: string) => {
@@ -257,7 +355,9 @@ describe('ArenaTurn', () => {
     await waitFor(() => expect(voteButtons().right).toBeEnabled());
     await userEvent.click(voteButtons().right);
 
-    await waitFor(() => expect(onVoted).toHaveBeenCalledWith(CONVERSATION));
+    await waitFor(() =>
+      expect(onVoted).toHaveBeenCalledWith(CONVERSATION, null),
+    );
     expect(voteCalls).toEqual([
       {
         url: 'chats/conv-1/arena/cmp-1/vote/',
@@ -294,7 +394,9 @@ describe('ArenaTurn', () => {
     await waitFor(() => expect(voteButtons().right).toBeEnabled());
     await userEvent.click(screen.getByTestId('arena-side-right'));
 
-    await waitFor(() => expect(onVoted).toHaveBeenCalledWith(CONVERSATION));
+    await waitFor(() =>
+      expect(onVoted).toHaveBeenCalledWith(CONVERSATION, null),
+    );
     expect(bodies).toEqual([JSON.stringify({ side: 'right' })]);
   });
 
@@ -330,5 +432,155 @@ describe('ArenaTurn', () => {
     await waitFor(() => expect(onAbandoned).toHaveBeenCalledWith(CONVERSATION));
     expect(voteCalls).toEqual([JSON.stringify({ side: null })]);
     expect(onVoted).not.toHaveBeenCalled();
+  });
+
+  describe('vote transition', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      // @ts-expect-error jsdom has no matchMedia; tests set it up when needed.
+      delete window.matchMedia;
+    });
+
+    it('hides the bar, collapses the loser and defers onVoted until the fallback timer', async () => {
+      mockRestoredVote(fetchAPIMock, { ...CONVERSATION, acknowledgement: ACK });
+      const onVoted = vi.fn();
+      renderTurn({ onVoted, restoredAnswers: RESTORED });
+
+      fireEvent.click(voteButtons().right);
+      await flushPromises();
+
+      // Bar gone, columns locked, loser fading, winner caption fading.
+      expect(
+        screen.queryByRole('button', { name: 'I prefer answer A' }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByTestId('arena-side-left')).toHaveAttribute(
+        'data-arena-state',
+        'loser',
+      );
+      expect(screen.getByTestId('arena-side-left')).toHaveAttribute(
+        'aria-hidden',
+        'true',
+      );
+      expect(screen.getByTestId('arena-side-right')).toHaveAttribute(
+        'data-arena-state',
+        'winner',
+      );
+      // The vote is recorded but the parent is not told yet.
+      expect(onVoted).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(319);
+      });
+      await flushPromises();
+      expect(onVoted).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      await flushPromises();
+      expect(onVoted).toHaveBeenCalledTimes(1);
+      expect(onVoted).toHaveBeenCalledWith(CONVERSATION, ACK);
+    });
+
+    it('fires onVoted as soon as the grid transition ends', async () => {
+      mockRestoredVote(fetchAPIMock);
+      const onVoted = vi.fn();
+      renderTurn({ onVoted, restoredAnswers: RESTORED });
+
+      fireEvent.click(voteButtons().left);
+      await flushPromises();
+      expect(onVoted).not.toHaveBeenCalled();
+
+      // An unrelated property ending does not count.
+      fireEvent.transitionEnd(screen.getByTestId('arena-split'), {
+        propertyName: 'gap',
+      });
+      await flushPromises();
+      expect(onVoted).not.toHaveBeenCalled();
+
+      fireEvent.transitionEnd(screen.getByTestId('arena-split'), {
+        propertyName: 'grid-template-columns',
+      });
+      await flushPromises();
+      expect(onVoted).toHaveBeenCalledWith(CONVERSATION, null);
+    });
+
+    it('waits for the vote response even when the transition is already over', async () => {
+      let resolveVote: (value: unknown) => void = () => {};
+      fetchAPIMock.mockImplementation((url: string) => {
+        if (url.startsWith('chat-cooldown')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ cooldown_seconds: 0 }),
+          });
+        }
+        return new Promise((resolve) => {
+          resolveVote = resolve;
+        });
+      });
+      const onVoted = vi.fn();
+      renderTurn({ onVoted, restoredAnswers: RESTORED });
+
+      fireEvent.click(voteButtons().left);
+      act(() => {
+        vi.advanceTimersByTime(320);
+      });
+      await flushPromises();
+      expect(onVoted).not.toHaveBeenCalled();
+
+      resolveVote({ ok: true, json: () => Promise.resolve(CONVERSATION) });
+      await flushPromises();
+      expect(onVoted).toHaveBeenCalledWith(CONVERSATION, null);
+    });
+
+    it('uses a short cross-fade only under reduced motion', async () => {
+      window.matchMedia = vi.fn().mockReturnValue({ matches: true });
+      mockRestoredVote(fetchAPIMock);
+      const onVoted = vi.fn();
+      renderTurn({ onVoted, restoredAnswers: RESTORED });
+
+      fireEvent.click(voteButtons().right);
+      await flushPromises();
+      expect(onVoted).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(170);
+      });
+      await flushPromises();
+      expect(onVoted).toHaveBeenCalledWith(CONVERSATION, null);
+    });
+
+    it('puts the columns and the bar back when the vote fails', async () => {
+      fetchAPIMock.mockImplementation((url: string) => {
+        if (url.startsWith('chat-cooldown')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ cooldown_seconds: 0 }),
+          });
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 500,
+          json: () => Promise.resolve({}),
+        });
+      });
+      const onVoted = vi.fn();
+      const onError = vi.fn();
+      renderTurn({ onVoted, onError, restoredAnswers: RESTORED });
+
+      fireEvent.click(voteButtons().left);
+      await flushPromises();
+
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onVoted).not.toHaveBeenCalled();
+      expect(screen.getByTestId('arena-side-right')).not.toHaveAttribute(
+        'data-arena-state',
+      );
+      expect(voteButtons().left).toBeEnabled();
+    });
   });
 });
