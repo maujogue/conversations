@@ -1,0 +1,448 @@
+{
+  "$comment": "Langfuse `Router` dashboard. Pushed by `python manage.py push_langfuse_dashboard` (see docs/langfuse/README.md). Widgets follow the /api/public/unstable/dashboard-widgets schema; `placement` is the tile on the 12-column dashboard grid.",
+  "name": "Router",
+  "description": "LLM router: tier share, tokens (energy proxy) and latency per tier, router overhead, cost per model, constraint fallbacks and arena votes.",
+  "filters": [],
+  "widgets": [
+    {
+      "placement": {
+        "id": "tier-share-simple",
+        "x": 0,
+        "y": 0,
+        "width": 4,
+        "height": 5
+      },
+      "widget": {
+        "name": "Router · Tier share: simple",
+        "description": "Turns (root `conversation` spans) whose trace carries the `tier:simple` tag, per time bucket. Compare the three tier widgets to read the tier share.",
+        "view": "observations",
+        "dimensions": [],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "name",
+            "operator": "=",
+            "value": "conversation",
+            "type": "string"
+          },
+          {
+            "column": "tags",
+            "operator": "any of",
+            "value": [
+              "tier:simple"
+            ],
+            "type": "arrayOptions"
+          }
+        ],
+        "chartType": "BAR_TIME_SERIES"
+      }
+    },
+    {
+      "placement": {
+        "id": "tier-share-standard",
+        "x": 4,
+        "y": 0,
+        "width": 4,
+        "height": 5
+      },
+      "widget": {
+        "name": "Router · Tier share: standard",
+        "description": "Turns (root `conversation` spans) whose trace carries the `tier:standard` tag, per time bucket. Compare the three tier widgets to read the tier share.",
+        "view": "observations",
+        "dimensions": [],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "name",
+            "operator": "=",
+            "value": "conversation",
+            "type": "string"
+          },
+          {
+            "column": "tags",
+            "operator": "any of",
+            "value": [
+              "tier:standard"
+            ],
+            "type": "arrayOptions"
+          }
+        ],
+        "chartType": "BAR_TIME_SERIES"
+      }
+    },
+    {
+      "placement": {
+        "id": "tier-share-complex",
+        "x": 8,
+        "y": 0,
+        "width": 4,
+        "height": 5
+      },
+      "widget": {
+        "name": "Router · Tier share: complex",
+        "description": "Turns (root `conversation` spans) whose trace carries the `tier:complex` tag, per time bucket. Compare the three tier widgets to read the tier share.",
+        "view": "observations",
+        "dimensions": [],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "name",
+            "operator": "=",
+            "value": "conversation",
+            "type": "string"
+          },
+          {
+            "column": "tags",
+            "operator": "any of",
+            "value": [
+              "tier:complex"
+            ],
+            "type": "arrayOptions"
+          }
+        ],
+        "chartType": "BAR_TIME_SERIES"
+      }
+    },
+    {
+      "placement": {
+        "id": "tier-usage-simple",
+        "x": 0,
+        "y": 5,
+        "width": 4,
+        "height": 6
+      },
+      "widget": {
+        "name": "Router · Tier simple: tokens & latency",
+        "description": "Per observation name on `tier:simple` traces: count, output/total tokens (energy proxy: Langfuse does not know Wh) and p50/p95 latency in ms. The `conversation` row is end-to-end turn latency; generation rows carry the tokens.",
+        "view": "observations",
+        "dimensions": [
+          {
+            "field": "name"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          },
+          {
+            "measure": "outputTokens",
+            "agg": "sum"
+          },
+          {
+            "measure": "totalTokens",
+            "agg": "sum"
+          },
+          {
+            "measure": "latency",
+            "agg": "p50"
+          },
+          {
+            "measure": "latency",
+            "agg": "p95"
+          }
+        ],
+        "filters": [
+          {
+            "column": "tags",
+            "operator": "any of",
+            "value": [
+              "tier:simple"
+            ],
+            "type": "arrayOptions"
+          }
+        ],
+        "chartType": "PIVOT_TABLE",
+        "chartConfig": {
+          "row_limit": 20,
+          "defaultSort": {
+            "column": "sum_totalTokens",
+            "order": "DESC"
+          }
+        }
+      }
+    },
+    {
+      "placement": {
+        "id": "tier-usage-standard",
+        "x": 4,
+        "y": 5,
+        "width": 4,
+        "height": 6
+      },
+      "widget": {
+        "name": "Router · Tier standard: tokens & latency",
+        "description": "Per observation name on `tier:standard` traces: count, output/total tokens (energy proxy: Langfuse does not know Wh) and p50/p95 latency in ms. The `conversation` row is end-to-end turn latency; generation rows carry the tokens.",
+        "view": "observations",
+        "dimensions": [
+          {
+            "field": "name"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          },
+          {
+            "measure": "outputTokens",
+            "agg": "sum"
+          },
+          {
+            "measure": "totalTokens",
+            "agg": "sum"
+          },
+          {
+            "measure": "latency",
+            "agg": "p50"
+          },
+          {
+            "measure": "latency",
+            "agg": "p95"
+          }
+        ],
+        "filters": [
+          {
+            "column": "tags",
+            "operator": "any of",
+            "value": [
+              "tier:standard"
+            ],
+            "type": "arrayOptions"
+          }
+        ],
+        "chartType": "PIVOT_TABLE",
+        "chartConfig": {
+          "row_limit": 20,
+          "defaultSort": {
+            "column": "sum_totalTokens",
+            "order": "DESC"
+          }
+        }
+      }
+    },
+    {
+      "placement": {
+        "id": "tier-usage-complex",
+        "x": 8,
+        "y": 5,
+        "width": 4,
+        "height": 6
+      },
+      "widget": {
+        "name": "Router · Tier complex: tokens & latency",
+        "description": "Per observation name on `tier:complex` traces: count, output/total tokens (energy proxy: Langfuse does not know Wh) and p50/p95 latency in ms. The `conversation` row is end-to-end turn latency; generation rows carry the tokens.",
+        "view": "observations",
+        "dimensions": [
+          {
+            "field": "name"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          },
+          {
+            "measure": "outputTokens",
+            "agg": "sum"
+          },
+          {
+            "measure": "totalTokens",
+            "agg": "sum"
+          },
+          {
+            "measure": "latency",
+            "agg": "p50"
+          },
+          {
+            "measure": "latency",
+            "agg": "p95"
+          }
+        ],
+        "filters": [
+          {
+            "column": "tags",
+            "operator": "any of",
+            "value": [
+              "tier:complex"
+            ],
+            "type": "arrayOptions"
+          }
+        ],
+        "chartType": "PIVOT_TABLE",
+        "chartConfig": {
+          "row_limit": 20,
+          "defaultSort": {
+            "column": "sum_totalTokens",
+            "order": "DESC"
+          }
+        }
+      }
+    },
+    {
+      "placement": {
+        "id": "router-overhead",
+        "x": 0,
+        "y": 11,
+        "width": 4,
+        "height": 6
+      },
+      "widget": {
+        "name": "Router · Overhead: tokens by observation",
+        "description": "Share of total tokens per generation name. The `router-classifier` slice is the routing overhead (spec target: under 2 percent of all tokens).",
+        "view": "observations",
+        "dimensions": [
+          {
+            "field": "name"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "totalTokens",
+            "agg": "sum"
+          }
+        ],
+        "filters": [
+          {
+            "column": "type",
+            "operator": "=",
+            "value": "GENERATION",
+            "type": "string"
+          }
+        ],
+        "chartType": "PIE"
+      }
+    },
+    {
+      "placement": {
+        "id": "cost-per-model",
+        "x": 4,
+        "y": 11,
+        "width": 4,
+        "height": 6
+      },
+      "widget": {
+        "name": "Router · Cost per model",
+        "description": "Total cost (USD, from Langfuse model definitions) per provided model name.",
+        "view": "observations",
+        "dimensions": [
+          {
+            "field": "providedModelName"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "totalCost",
+            "agg": "sum"
+          }
+        ],
+        "filters": [
+          {
+            "column": "type",
+            "operator": "=",
+            "value": "GENERATION",
+            "type": "string"
+          }
+        ],
+        "chartType": "HORIZONTAL_BAR",
+        "chartConfig": {
+          "row_limit": 20
+        }
+      }
+    },
+    {
+      "placement": {
+        "id": "constraint-fallbacks",
+        "x": 8,
+        "y": 11,
+        "width": 4,
+        "height": 6
+      },
+      "widget": {
+        "name": "Router · Constraint fallbacks",
+        "description": "Turns whose trace is tagged `routed:constraint_fallback`, per time bucket.",
+        "view": "observations",
+        "dimensions": [],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "name",
+            "operator": "=",
+            "value": "conversation",
+            "type": "string"
+          },
+          {
+            "column": "tags",
+            "operator": "any of",
+            "value": [
+              "routed:constraint_fallback"
+            ],
+            "type": "arrayOptions"
+          }
+        ],
+        "chartType": "BAR_TIME_SERIES"
+      }
+    },
+    {
+      "placement": {
+        "id": "arena-votes",
+        "x": 0,
+        "y": 17,
+        "width": 12,
+        "height": 6
+      },
+      "widget": {
+        "name": "Router · Arena votes",
+        "description": "Categorical `arena_preference` scores per value over time. The `traceName is not null` filter forces the trace join, without which Langfuse v4 counts each trace-level score once per observation of the trace.",
+        "view": "scores-categorical",
+        "dimensions": [
+          {
+            "field": "stringValue"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "name",
+            "operator": "=",
+            "value": "arena_preference",
+            "type": "string"
+          },
+          {
+            "column": "traceName",
+            "operator": "is not null",
+            "value": "",
+            "type": "null"
+          }
+        ],
+        "chartType": "BAR_TIME_SERIES"
+      }
+    }
+  ]
+}
