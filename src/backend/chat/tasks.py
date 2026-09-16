@@ -11,6 +11,7 @@ from asgiref.sync import async_to_sync
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
+from chat import tier_energy
 from chat.agent_rag.indexing import index_project_attachment, parse_and_store_with_retry
 from chat.agents.history_processors import (
     generate_history_summary,
@@ -152,3 +153,14 @@ def summarize_conversation_history(conversation_id: str) -> None:
         conversation.persist_history_summary(summary, checkpoint)
     finally:
         conversation.release_history_summarization_claim()
+
+
+@app.task(ignore_result=True)
+def refresh_tier_energy_task(days: int = tier_energy.WINDOW_DAYS) -> dict:
+    """Recompute the mean Wh per answer of each routing tier (router spec section 10).
+
+    Weekly periodic task (``CELERY_BEAT_SCHEDULE["refresh-tier-energy"]``), same
+    work as the ``refresh_tier_energy`` management command. Fire and forget: the
+    result is the tier settings row, not the return value.
+    """
+    return tier_energy.refresh_tier_energy(days=days)
