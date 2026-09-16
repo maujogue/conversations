@@ -11,6 +11,7 @@ from django.utils import timezone
 from django.utils.module_loading import import_string
 
 import langfuse
+from asgiref.sync import async_to_sync
 from drf_spectacular.utils import extend_schema
 from rest_framework import decorators, filters, mixins, permissions, status, viewsets
 from rest_framework.exceptions import MethodNotAllowed, PermissionDenied, ValidationError
@@ -18,6 +19,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.api.viewsets import Pagination, SerializerPerActionMixin
+from core.feature_flags.helpers import is_feature_enabled
 from core.file_upload.enums import AttachmentStatus
 from core.file_upload.mixins import AttachmentMixin
 
@@ -34,7 +36,8 @@ from chat.rate_limiting import (
     ConversationCreateHourlyThrottle,
     get_cooldown_remaining,
 )
-from chat.serializers import ChatConversationRequestSerializer
+from chat.router import routing as routing_service
+from chat.serializers import TIER_AUTO, ChatConversationRequestSerializer
 from chat.views.arena import ArenaMixin
 from chat.views.edit_in_docs import EditInDocsMixin
 from chat.views.filters import ProjectFilter, TitleSearchFilter
@@ -223,7 +226,7 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
         url_path="conversation",
         url_name="conversation",
     )
-    def post_conversation(self, request, pk):  # pylint: disable=unused-argument,too-many-locals
+    def post_conversation(self, request, pk):  # noqa: PLR0912, PLR0915  # pylint: disable=unused-argument,too-many-locals,too-many-branches,too-many-statements
         """Handle POST requests to the chat endpoint.
 
         Args:
@@ -237,7 +240,17 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
         query_params_serializer = ChatConversationRequestSerializer(data=request.query_params)
         query_params_serializer.is_valid(raise_exception=True)
         force_web_search = query_params_serializer.validated_data["force_web_search"]
-        requested_model_hrid = query_params_serializer.validated_data["model_hrid"]
+        requested_model_hrid = query_params_serializer.validated_data["model_hrid"] or None
+        requested_tier = query_params_serializer.validated_data["tier"]
+
+        # The raw model picker is a dev/staging debugging aid: staff only, behind
+        # its own flag. Users choose tiers, never models (router spec section 6).
+        if requested_model_hrid and not self._model_picker_allowed(request.user):
+            raise ValidationError(
+                {"model_hrid": "Choosing a model is not allowed; choose a tier instead."}
+            )
+        if requested_model_hrid and requested_model_hrid not in settings.LLM_CONFIGURATIONS:
+            raise ValidationError({"model_hrid": "Unknown model."})
 
         raw_messages = request.data.get("messages")
         logger.info(
@@ -332,12 +345,32 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
             # update_fields is set, so list it explicitly to preserve the bump.
             update_fields = ["ui_messages", "updated_at"]
 
-            # Pin the model the first time the conversation is exercised. Existing
-            # conversations keep their pinned model so a recovered main model never
-            # moves a chat already in progress. A conditional UPDATE with
-            # model_hrid="" is the compare-and-set: only the first concurrent
-            # request can pin, late peers re-read the winner.
-            if not conversation.model_hrid:
+            # A manual tier choice applies to the conversation until changed;
+            # `auto` hands the decision back to the router (router spec 5.3).
+            if requested_tier is not None:
+                conversation.pinned_tier = None if requested_tier == TIER_AUTO else requested_tier
+                update_fields.append("pinned_tier")
+
+            routing_decision = None
+            if is_feature_enabled(request.user, "router"):
+                # With the router on, the model is resolved on every turn and
+                # `model_hrid` becomes "model of the last turn" (router spec 5.2).
+                # The previous labels are read before `last_routing` is overwritten.
+                routing_decision = self._route_turn(
+                    conversation,
+                    messages[-1],
+                    force_web_search=force_web_search,
+                    requested_model_hrid=requested_model_hrid,
+                )
+                conversation.model_hrid = routing_decision.model_hrid
+                conversation.last_routing = routing_service.last_routing_payload(routing_decision)
+                update_fields += ["model_hrid", "last_routing"]
+            elif not conversation.model_hrid:
+                # Pin the model the first time the conversation is exercised. Existing
+                # conversations keep their pinned model so a recovered main model never
+                # moves a chat already in progress. A conditional UPDATE with
+                # model_hrid="" is the compare-and-set: only the first concurrent
+                # request can pin, late peers re-read the winner.
                 resolved = resolve_effective_model_hrid(requested_model_hrid)
                 pinned = models.ChatConversation.objects.filter(
                     pk=conversation.pk, model_hrid=""
@@ -355,6 +388,7 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
                 session=request.session,
                 model_hrid=conversation.model_hrid,
                 language=language,
+                routing_decision=routing_decision,
             )
 
         # This environment variable allows switching between sync and async streaming modes
@@ -380,6 +414,29 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
             },
         )
         return response
+
+    @staticmethod
+    def _model_picker_allowed(user) -> bool:
+        """Whether `model_hrid` may be honoured: staff with the dev picker flag."""
+        return bool(user.is_staff) and is_feature_enabled(user, "dev_model_picker")
+
+    @staticmethod
+    def _route_turn(conversation, message, *, force_web_search, requested_model_hrid):
+        """Run the router for this turn. The view is sync; the router is async."""
+        has_attachments = routing_service.message_has_file(message) or (
+            conversation.attachments.filter(upload_state=AttachmentStatus.READY).exists()
+        )
+        return async_to_sync(routing_service.route_turn)(
+            conversation=conversation,
+            user=conversation.owner,
+            message=message,
+            force_web_search=force_web_search,
+            has_attachments=has_attachments,
+            has_project_context=conversation.project_id is not None,
+            requested_model_hrid=requested_model_hrid,
+            previous_labels=routing_service.previous_labels_from(conversation),
+            previous_answer_excerpt=routing_service.last_answer_excerpt(conversation),
+        )
 
     @decorators.action(
         methods=["post"],

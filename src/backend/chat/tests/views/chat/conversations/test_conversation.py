@@ -16,6 +16,7 @@ from freezegun import freeze_time
 from rest_framework import status
 
 from core.factories import UserFactory
+from core.feature_flags.flags import FeatureToggle
 
 from chat.agents.conversation import PREVENT_URL_HALLUCINATION_INSTRUCTION
 from chat.ai_sdk_types import (
@@ -796,6 +797,13 @@ def test_post_conversation_model_selection_new(
     }
 
     chat_conversation = ChatConversationFactory()
+    # The raw picker is a staff-only debugging tool behind its own flag; the
+    # rejection paths live in test_conversation_router.py.
+    chat_conversation.owner.is_staff = True
+    chat_conversation.owner.save(update_fields=["is_staff"])
+    settings.FEATURE_FLAGS = settings.FEATURE_FLAGS.model_copy(
+        update={"dev_model_picker": FeatureToggle.ENABLED}
+    )
 
     url = f"/api/v1.0/chats/{chat_conversation.pk}/conversation/?model_hrid=plop"
     api_client.force_login(chat_conversation.owner)

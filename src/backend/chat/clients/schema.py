@@ -49,6 +49,48 @@ class StreamingState:
     tool_is_streaming: bool = False
     ui_sources: List[SourceUrlUIPart] = dataclasses.field(default_factory=list)
     model_response_message_id: Optional[str] = None
+    # Monotonic timestamps of the first reasoning delta and the first text delta,
+    # used to measure how long a reasoning model thought before answering.
+    first_thinking_at: Optional[float] = None
+    first_text_at: Optional[float] = None
+
+    def note_thinking(self, now: float) -> None:
+        """Record the first streamed reasoning delta."""
+        if self.first_thinking_at is None:
+            self.first_thinking_at = now
+
+    def note_text(self, now: float) -> None:
+        """Record the first streamed text delta."""
+        if self.first_text_at is None:
+            self.first_text_at = now
+
+    def reasoning_seconds(self, now: float) -> float | None:
+        """Seconds between the first reasoning delta and the first text delta.
+
+        None when the model did not reason. When it reasoned but never produced
+        text, the time up to ``now`` is returned.
+        """
+        if self.first_thinking_at is None:
+            return None
+        end = self.first_text_at if self.first_text_at is not None else now
+        return round(max(end - self.first_thinking_at, 0.0), 1)
+
+
+@dataclasses.dataclass
+class TurnMetrics:
+    """Per-turn figures measured on the stream and recorded with the answer (spec 5.5, 10)."""
+
+    reasoning_tokens: int = 0
+    reasoning_seconds: Optional[float] = None
+    co2_source: Optional[str] = None
+
+    def as_metadata(self) -> Dict:
+        """Keys added to the assistant message metadata."""
+        return {
+            "reasoning_tokens": self.reasoning_tokens,
+            "reasoning_seconds": self.reasoning_seconds,
+            "co2_source": self.co2_source,
+        }
 
 
 @dataclasses.dataclass
