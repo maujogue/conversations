@@ -13,6 +13,7 @@ import { KEY_CONVERSATION } from '@/features/chat/api/useConversation';
 import { KEY_LIST_CONVERSATION } from '@/features/chat/api/useConversations';
 import { KEY_LIST_PROJECT } from '@/features/chat/api/useProjects';
 import { useChatPreferencesStore } from '@/features/chat/stores/useChatPreferencesStore';
+import { TierSlug, isTierSlug } from '@/features/chat/types';
 
 const makeFetchAPIAdapter =
   (extraSearchParams?: Record<string, string>) =>
@@ -32,7 +33,7 @@ const makeFetchAPIAdapter =
 
     // Read at request time, not at render time: the transport is built once but
     // these preferences change between messages.
-    const { forceWebSearch, selectedModelHrid } =
+    const { forceWebSearch, selectedModelHrid, selectedTier } =
       useChatPreferencesStore.getState();
 
     if (forceWebSearch) {
@@ -41,12 +42,17 @@ const makeFetchAPIAdapter =
 
     if (extraSearchParams) {
       // Arena candidates: the backend picks the model per side, so the pinned
-      // model preference must not travel with the request.
+      // tier / model preference must not travel with the request.
       Object.entries(extraSearchParams).forEach(([key, value]) => {
         searchParams.append(key, value);
       });
     } else if (selectedModelHrid) {
+      // Staff debug picker: a raw model bypasses the router entirely.
       searchParams.append('model_hrid', selectedModelHrid);
+    } else {
+      // `auto` travels too: it is how the backend learns a pinned tier was
+      // released on this conversation.
+      searchParams.append('tier', selectedTier);
     }
 
     if (searchParams.toString()) {
@@ -92,6 +98,37 @@ function isCooldownEvent(item: unknown): item is CooldownEvent {
     item.type === 'cooldown' &&
     'seconds' in item &&
     typeof (item as CooldownEvent).seconds === 'number'
+  );
+}
+
+export type TierSource = 'router' | 'user' | 'constraint';
+
+/**
+ * The router's decision for a turn, streamed as a transient `data-routing`
+ * part before the first token (spec 7.1). `tier_label` is an i18n key.
+ */
+export interface RoutingEvent {
+  tier: TierSlug;
+  tier_label?: string;
+  tier_source: TierSource;
+  /** The tier differs from the previous turn's: animate the pictogram once. */
+  changed?: boolean;
+  /** A reasoning model was picked: the reasoning indicator may follow. */
+  reasoning?: boolean;
+  /** Why a constraint bumped the tier (e.g. `image`), when the backend says. */
+  constraint?: string;
+}
+
+const TIER_SOURCES: readonly string[] = ['router', 'user', 'constraint'];
+
+export function isRoutingEvent(item: unknown): item is RoutingEvent {
+  return (
+    typeof item === 'object' &&
+    item !== null &&
+    'tier' in item &&
+    isTierSlug((item as RoutingEvent).tier) &&
+    'tier_source' in item &&
+    TIER_SOURCES.includes((item as RoutingEvent).tier_source)
   );
 }
 
@@ -194,6 +231,14 @@ export function useChat({
   const queryClient = useQueryClient();
   // Epoch ms until which the user must wait before sending a new message.
   const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  // Router decisions by assistant message id. The `data-routing` part is
+  // transient (never written into the message), so it is kept here for the
+  // lifetime of the chat; after a reload the persisted metadata takes over.
+  const [routingByMessageId, setRoutingByMessageId] = useState<
+    Record<string, RoutingEvent>
+  >({});
+  // A decision that arrived before its assistant message reached the state.
+  const pendingRoutingRef = useRef<RoutingEvent | null>(null);
 
   // The transport is captured when the chat is created, so the callbacks it
   // ends up holding must always reach the latest render's handlers.
@@ -235,6 +280,11 @@ export function useChat({
         setCooldownUntil(Date.now() + item.seconds * 1000);
       } else if (isImagesSkippedEvent(item)) {
         onImagesSkippedRef.current?.(item.kind);
+      } else if (part.type === 'data-routing' && isRoutingEvent(item)) {
+        // The assistant message is created on `start`, before this part, but
+        // it may not have reached the rendered state yet: attach it from the
+        // effect below once the message is there.
+        pendingRoutingRef.current = item;
       }
     },
     [queryClient],
@@ -248,6 +298,17 @@ export function useChat({
   // assistant-terminated message list with an empty stream: the bubble stays
   // blank instead of showing an error and a retry.
   const result = useAiSdkChat({ ...options, transport, onData });
+
+  const lastMessage = result.messages.at(-1);
+  useEffect(() => {
+    const pending = pendingRoutingRef.current;
+    if (!pending || lastMessage?.role !== 'assistant') {
+      return;
+    }
+    pendingRoutingRef.current = null;
+    const messageId = lastMessage.id;
+    setRoutingByMessageId((prev) => ({ ...prev, [messageId]: pending }));
+  }, [lastMessage]);
 
   // Restore the cooldown from the backend (the authoritative source) so it
   // survives a refresh, a new tab, or switching conversations. react-query
@@ -268,5 +329,5 @@ export function useChat({
     );
   }, [cooldownData]);
 
-  return { ...result, cooldownUntil };
+  return { ...result, cooldownUntil, routingByMessageId };
 }

@@ -12,6 +12,7 @@ import { useChatPreferencesStore } from '@/features/chat/stores/useChatPreferenc
 
 import {
   isImagesSkippedEvent,
+  isRoutingEvent,
   stampImagesSkippedOnLatestUserMessage,
   useChat,
 } from '../useChat';
@@ -237,7 +238,7 @@ describe('useChat multi-step continuation', () => {
 
     // A second POST would carry an assistant-terminated message list, which the
     // backend answers with an empty stream — leaving the bubble blank.
-    expect(chatCalls).toEqual([CHAT_API]);
+    expect(chatCalls).toEqual([`${CHAT_API}?tier=auto`]);
   });
 });
 
@@ -378,5 +379,158 @@ describe('useChat against a backend stream', () => {
     expect(assistant.parts.some((part) => part.type.startsWith('data-'))).toBe(
       false,
     );
+  });
+});
+
+describe('isRoutingEvent', () => {
+  it('accepts a router decision', () => {
+    expect(
+      isRoutingEvent({
+        tier: 'complex',
+        tier_label: 'router.tier.complex',
+        tier_source: 'router',
+        changed: true,
+        reasoning: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects an unknown tier or source', () => {
+    expect(isRoutingEvent({ tier: 'huge', tier_source: 'router' })).toBe(false);
+    expect(isRoutingEvent({ tier: 'simple', tier_source: 'admin' })).toBe(
+      false,
+    );
+    expect(isRoutingEvent({ type: 'cooldown', seconds: 3 })).toBe(false);
+    expect(isRoutingEvent(null)).toBe(false);
+  });
+});
+
+// A routed turn: the decision lands after `start` and before the first token.
+const ROUTED_TURN = [
+  'data: {"type":"start","messageId":"trace-routed"}\n\n',
+  'data: {"type":"data-routing","data":{"tier":"complex"',
+  ',"tier_label":"router.tier.complex","tier_source":"router","changed":true',
+  ',"reasoning":true},"transient":true}\n\n',
+  'data: {"type":"reasoning-start","id":"r0"}\n\n',
+  'data: {"type":"reasoning-delta","id":"r0","delta":"Let me think."}\n\n',
+  'data: {"type":"reasoning-end","id":"r0"}\n\n',
+  'data: {"type":"text-start","id":"0"}\n\n',
+  'data: {"type":"text-delta","id":"0","delta":"Answer"}\n\n',
+  'data: {"type":"text-end","id":"0"}\n\n',
+  'data: {"type":"finish","messageMetadata":{"co2_impact":0.5,"tier":"complex"',
+  ',"tier_source":"router","reasoning_seconds":12}}\n\n',
+  'data: [DONE]\n\n',
+].join('');
+
+describe('useChat routing', () => {
+  const fetchAPIMock = vi.mocked(fetchAPI) as unknown as Mock;
+
+  const wrapper = ({ children }: { children: React.ReactNode }) => (
+    <QueryClientProvider
+      client={
+        new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      }
+    >
+      {children}
+    </QueryClientProvider>
+  );
+
+  const mockStream = (chatCalls: string[]) => {
+    fetchAPIMock.mockImplementation((url: string) => {
+      if (url.startsWith('chat-cooldown')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ cooldown_seconds: 0 }),
+        });
+      }
+      chatCalls.push(url);
+      return Promise.resolve({ ok: true, body: streamOf(ROUTED_TURN) });
+    });
+  };
+
+  afterEach(() => {
+    useChatPreferencesStore.setState({
+      selectedTier: 'auto',
+      selectedModelHrid: null,
+    });
+  });
+
+  it('keeps the routing decision per assistant message and the reasoning parts', async () => {
+    const chatCalls: string[] = [];
+    mockStream(chatCalls);
+
+    const { result } = renderHook(
+      () => useChat({ id: 'conv-1', api: CHAT_API }),
+      { wrapper },
+    );
+
+    await act(async () => {
+      await result.current.sendMessage({ text: 'hello' });
+    });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    const assistant = result.current.messages.at(-1)!;
+    expect(assistant.id).toBe('trace-routed');
+    expect(result.current.routingByMessageId['trace-routed']).toEqual({
+      tier: 'complex',
+      tier_label: 'router.tier.complex',
+      tier_source: 'router',
+      changed: true,
+      reasoning: true,
+    });
+    // The transient part never lands in the message; reasoning parts do.
+    expect(assistant.parts.some((part) => part.type.startsWith('data-'))).toBe(
+      false,
+    );
+    expect(assistant.parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'reasoning', text: 'Let me think.' }),
+        expect.objectContaining({ type: 'text', text: 'Answer' }),
+      ]),
+    );
+    expect(assistant.metadata).toMatchObject({
+      tier: 'complex',
+      tier_source: 'router',
+      reasoning_seconds: 12,
+    });
+    // Auto travels by default.
+    expect(chatCalls).toEqual([`${CHAT_API}?tier=auto`]);
+  });
+
+  it('sends the pinned tier', async () => {
+    useChatPreferencesStore.setState({ selectedTier: 'standard' });
+    const chatCalls: string[] = [];
+    mockStream(chatCalls);
+
+    const { result } = renderHook(
+      () => useChat({ id: 'conv-1', api: CHAT_API }),
+      { wrapper },
+    );
+    await act(async () => {
+      await result.current.sendMessage({ text: 'hello' });
+    });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    expect(chatCalls).toEqual([`${CHAT_API}?tier=standard`]);
+  });
+
+  it('sends model_hrid instead of the tier when a debug model is pinned', async () => {
+    useChatPreferencesStore.setState({
+      selectedTier: 'standard',
+      selectedModelHrid: 'debug-model',
+    });
+    const chatCalls: string[] = [];
+    mockStream(chatCalls);
+
+    const { result } = renderHook(
+      () => useChat({ id: 'conv-1', api: CHAT_API }),
+      { wrapper },
+    );
+    await act(async () => {
+      await result.current.sendMessage({ text: 'hello' });
+    });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    expect(chatCalls).toEqual([`${CHAT_API}?model_hrid=debug-model`]);
   });
 });

@@ -5,10 +5,10 @@ import '@/i18n/initI18n';
 
 import { InputChatActions } from '../InputChatAction';
 
-vi.mock('../ModelSelector', () => ({
-  ModelSelector: ({ onModelSelect }: { onModelSelect: () => void }) => (
-    <button onClick={onModelSelect} data-testid="model-selector">
-      Model Selector
+vi.mock('../TierSelector', () => ({
+  TierSelector: ({ onTierSelect }: { onTierSelect: () => void }) => (
+    <button onClick={onTierSelect} data-testid="tier-selector">
+      Tier Selector
     </button>
   ),
 }));
@@ -41,7 +41,7 @@ const defaultProps = {
   isMobile: false,
   forceWebSearch: false,
   onAttachClick: vi.fn(),
-  selectedModel: null,
+  selectedTier: 'auto' as const,
   status: null,
   inputHasContent: true,
 };
@@ -149,19 +149,17 @@ describe('InputChatActions', () => {
     ).toBeDisabled();
   });
 
-  it('should render model selector when onModelSelect is provided', () => {
-    const onModelSelect = vi.fn();
-    render(
-      <InputChatActions {...defaultProps} onModelSelect={onModelSelect} />,
-    );
+  it('should render the tier selector when onTierSelect is provided', () => {
+    const onTierSelect = vi.fn();
+    render(<InputChatActions {...defaultProps} onTierSelect={onTierSelect} />);
 
-    expect(screen.getByTestId('model-selector')).toBeInTheDocument();
+    expect(screen.getByTestId('tier-selector')).toBeInTheDocument();
   });
 
-  it('should not render model selector when onModelSelect is undefined', () => {
-    render(<InputChatActions {...defaultProps} onModelSelect={undefined} />);
+  it('should not render the tier selector when onTierSelect is undefined', () => {
+    render(<InputChatActions {...defaultProps} onTierSelect={undefined} />);
 
-    expect(screen.queryByTestId('model-selector')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('tier-selector')).not.toBeInTheDocument();
   });
 
   it('should render send button', () => {

@@ -3,10 +3,10 @@ import { memo, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Box, Icon, Text } from '@/components';
-import { LLMModel } from '@/features/chat/api/useLLMConfiguration';
+import { LLMModel, TierSlug } from '@/features/chat/api/useLLMConfiguration';
 
-import { ModelSelector } from './ModelSelector';
 import { SendButton } from './SendButton';
+import { TierSelector } from './TierSelector';
 interface InputChatActionsProps {
   /** Whether file upload feature is enabled */
   fileUploadEnabled: boolean;
@@ -22,10 +22,14 @@ interface InputChatActionsProps {
   onAttachClick: () => void;
   /** Handler for web search toggle - if undefined, button is hidden */
   onWebSearchToggle?: () => void;
-  /** Handler for model selection - if undefined, selector is hidden */
+  /** Handler for tier selection - if undefined, the selector is hidden */
+  onTierSelect?: (tier: TierSlug) => void;
+  /** Tier of the current conversation */
+  selectedTier?: TierSlug;
+  /** Staff debug picker: handler for a raw model choice */
   onModelSelect?: (model: LLMModel) => void;
-  /** Currently selected model */
-  selectedModel: LLMModel | null;
+  /** Staff debug picker: the raw model pinned, if any */
+  selectedModelHrid?: string | null;
   /** Current chat status */
   status: string | null;
   /** Whether input has content (for send button) */
@@ -50,6 +54,8 @@ const MOBILE_WEB_BUTTON_CSS = `
 `;
 
 const ACTIONS_OPACITY_CSS = 'opacity: 1;';
+
+const noop = () => {};
 
 const ACTIVE_WEB_BUTTON_CSS = `
   .research-web-button {
@@ -79,7 +85,7 @@ const CLOSE_ICON_CSS = `
 
 /**
  * Action buttons for the chat input.
- * Includes: Attach file, Web search toggle, Model selector, Send button.
+ * Includes: Attach file, Web search toggle, Tier selector, Send button.
  *
  * Memoized to prevent re-renders when parent updates but props haven't changed.
  */
@@ -92,8 +98,10 @@ export const InputChatActions = memo(
     forceWebSearch,
     onAttachClick,
     onWebSearchToggle,
+    onTierSelect,
+    selectedTier = 'auto',
     onModelSelect,
-    selectedModel,
+    selectedModelHrid = null,
     status,
     inputHasContent,
     sendDisabled = false,
@@ -210,18 +218,20 @@ export const InputChatActions = memo(
           )}
         </Box>
 
-        {/* Right side: Model selector + Send */}
+        {/* Right side: Tier selector + Send */}
         <Box
           $direction="row"
           $align="center"
           $padding={STYLES.horizontalPadding}
           $gap="xs"
         >
-          {onModelSelect && (
+          {onTierSelect && (
             <Box $padding={STYLES.horizontalPaddingXs}>
-              <ModelSelector
-                selectedModel={selectedModel}
-                onModelSelect={onModelSelect}
+              <TierSelector
+                selectedTier={selectedTier}
+                onTierSelect={onTierSelect}
+                selectedModelHrid={selectedModelHrid}
+                onModelSelect={onModelSelect ?? noop}
               />
             </Box>
           )}
