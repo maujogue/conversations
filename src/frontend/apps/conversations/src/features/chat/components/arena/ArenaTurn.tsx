@@ -263,31 +263,14 @@ export const ArenaTurn = ({
     const showThinking =
       started && isPending(status) && (!candidate || status === 'submitted');
 
-    const clickable = bothReady && !voting;
     const isLoser = chosen !== null && chosen !== side;
     const isWinner = chosen === side;
     const fadeMs = reducedMotion ? REDUCED_MOTION_MS : LOSER_FADE_MS;
-    // Clicking anywhere on an answer votes for it, like LM Arena. Clicks on
-    // interactive content (links, code copy buttons) and text selections are
-    // left alone.
-    const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {
-      if (!clickable) {
-        return;
-      }
-      const target = event.target as HTMLElement;
-      if (target.closest('a, button, input, textarea, select')) {
-        return;
-      }
-      if (window.getSelection()?.toString()) {
-        return;
-      }
-      void vote(side);
-    };
 
+    // Voting happens only through the two buttons of the vote bar: the
+    // columns themselves are plain, non-interactive content, so selecting
+    // text or following a link inside an answer can never cast a vote.
     return (
-      // The column click is a pointer shortcut; keyboard users vote with the
-      // buttons below, so the container is not made focusable on purpose.
-      // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
       <Box
         $direction="column"
         $gap="0.5rem"
@@ -300,7 +283,6 @@ export const ArenaTurn = ({
           ${isMobile ? 'max-height: calc(60vh + 80px);' : ''}
           transition:
             border-color 0.15s ease,
-            box-shadow 0.15s ease,
             opacity ${fadeMs}ms ease-out,
             max-height ${fadeMs}ms ease-out,
             padding ${fadeMs}ms ease-out;
@@ -312,24 +294,12 @@ export const ArenaTurn = ({
           ${isMobile && !reducedMotion ? 'max-height: 0; padding: 0; border-color: transparent;' : ''}`
               : ''
           }
-          ${
-            clickable
-              ? `
-          cursor: pointer;
-          &:hover {
-            border-color: var(--c--contextuals--border--semantic--brand--primary, #000091);
-            box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.08);
-          }`
-              : ''
-          }
         `}
         data-testid={`arena-side-${side}`}
         data-arena-state={isLoser ? 'loser' : isWinner ? 'winner' : undefined}
         role="group"
         aria-label={caption}
         aria-hidden={isLoser || undefined}
-        title={clickable ? t('Click to pick this answer') : undefined}
-        onClick={handleClick}
       >
         <Text
           as="h3"

@@ -9,7 +9,7 @@ vi.mock('react-i18next', () => ({
 }));
 
 const INTRO =
-  'For each question, the assistant automatically picks the most suitable and most frugal model. You can see this choice above each answer.';
+  'For each question, the assistant automatically picks the most suitable and most frugal model. You can see this choice under each answer.';
 
 describe('RouterIntro', () => {
   beforeEach(() => {

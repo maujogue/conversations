@@ -1,6 +1,7 @@
 import type { Mock } from 'vitest';
 
 import { fetchAPI } from '@/api';
+import { useChatPreferencesStore } from '@/features/chat/stores/useChatPreferencesStore';
 
 import {
   ArenaManualError,
@@ -16,9 +17,19 @@ vi.mock('@/api', async (importOriginal) => ({
 
 const fetchAPIMock = vi.mocked(fetchAPI) as unknown as Mock;
 
+const drawBody = () =>
+  JSON.parse(fetchAPIMock.mock.calls[0][1].body as string) as Record<
+    string,
+    unknown
+  >;
+
 describe('drawArena', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useChatPreferencesStore.setState({
+      selectedTier: 'auto',
+      selectedModelHrid: null,
+    });
   });
 
   it('posts the web search flag and returns the draw', async () => {
@@ -32,8 +43,35 @@ describe('drawArena', () => {
     expect(result).toEqual({ arena: true, comparison_id: 'cmp-1' });
     expect(fetchAPIMock).toHaveBeenCalledWith('chats/conv-1/arena/draw/', {
       method: 'POST',
-      body: JSON.stringify({ force_web_search: true }),
+      body: JSON.stringify({ force_web_search: true, tier: 'auto' }),
     });
+  });
+
+  it('carries the pinned tier: an arena turn is routed by the draw alone', async () => {
+    useChatPreferencesStore.setState({ selectedTier: 'complex' });
+    fetchAPIMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ arena: true, comparison_id: 'cmp-1' }),
+    });
+
+    await drawArena('conv-1', false);
+
+    expect(drawBody().tier).toBe('complex');
+  });
+
+  it('omits the tier under a raw model pin, as the streaming transport does', async () => {
+    useChatPreferencesStore.setState({
+      selectedTier: 'complex',
+      selectedModelHrid: 'some-model',
+    });
+    fetchAPIMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ arena: false }),
+    });
+
+    await drawArena('conv-1', false);
+
+    expect(drawBody()).not.toHaveProperty('tier');
   });
 
   it('returns arena false when the backend says so', async () => {

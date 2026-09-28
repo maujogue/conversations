@@ -325,6 +325,17 @@ class ArenaDrawSerializer(serializers.Serializer):  # pylint: disable=abstract-m
         required=False, default=False, help_text="The user forced web search for this turn."
     )
     message = SchemaField(schema=UIMessage, required=False)
+    tier = serializers.ChoiceField(
+        choices=[TIER_AUTO, *[tier.value for tier in RoutingTier]],
+        required=False,
+        default=None,
+        allow_null=True,
+        help_text=(
+            "Tier pinned by the user for this and the next turns, as on the streaming"
+            " endpoint. An arena turn does not route again, so the pin has to be applied"
+            " here or the comparison would be drawn for the tier the router picked."
+        ),
+    )
 
     def validate_message(self, message):
         """Only user input can start a comparison."""

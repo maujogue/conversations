@@ -126,6 +126,21 @@ def _rate_block(wins: int, total: int, threshold: int) -> dict:
     }
 
 
+def _cost_comparison(champion_cost, challenger_cost) -> dict:
+    """How the challenger's cost per answer compares, as a multiple at or above 1.
+
+    ``cost_multiple`` is always >= 1 and ``cost_direction`` says which way it goes,
+    so the table never has to render "x0.02 cheaper" for an answer that costs fifty
+    times more.
+    """
+    if not challenger_cost or champion_cost is None or not champion_cost:
+        return {"cost_multiple": None, "cost_direction": None}
+    ratio = float(champion_cost) / float(challenger_cost)
+    if ratio >= 1:
+        return {"cost_multiple": ratio, "cost_direction": "cheaper"}
+    return {"cost_multiple": 1 / ratio, "cost_direction": "dearer"}
+
+
 def _percentile(values, fraction: float) -> float | None:
     """Nearest-rank percentile of a list of numbers, ``None`` when empty."""
     numbers = sorted(v for v in values if v is not None)
@@ -213,6 +228,10 @@ def _challenger_row(hrid: str, rows: list, manual_rows: list, threshold: int) ->
             if mean_challenger_cost and mean_champion_cost is not None
             else None
         ),
+        # The ratio alone reads wrong in the table: a challenger at 0.02 is not
+        # "x0.02 cheaper", it is fifty times dearer. Render the multiple and the
+        # direction instead, both derived from the same number.
+        **_cost_comparison(mean_champion_cost, mean_challenger_cost),
         "mean_completion_tokens": _mean(c.challenger_completion_tokens for c in rows),
         "mean_reasoning_tokens": _mean(c.challenger_reasoning_tokens for c in rows),
         "mean_latency_ms": _mean(c.challenger_latency_ms for c in rows),

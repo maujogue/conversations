@@ -30,7 +30,7 @@ export const RouterIntro = () => {
     <Box $width="100%" $margin={{ bottom: 'xs' }} data-testid="router-intro">
       <Text $theme="neutral" $variation="tertiary" $size="sm">
         {t(
-          'For each question, the assistant automatically picks the most suitable and most frugal model. You can see this choice above each answer.',
+          'For each question, the assistant automatically picks the most suitable and most frugal model. You can see this choice under each answer.',
         )}
       </Text>
     </Box>

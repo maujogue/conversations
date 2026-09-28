@@ -191,6 +191,74 @@ def test_trace_tags_and_metadata(service):
     assert service._routing_trace_metadata() == {}
 
 
+def test_arena_trace_tags_and_metadata(service):
+    """An arena side carries the labels a Langfuse reader needs to slice its vote."""
+    assert service._arena_trace_tags() == []
+    assert service._arena_trace_metadata() == {}
+
+    service._arena_comparison = SimpleNamespace(
+        experiment_id="11111111-2222-3333-4444-555555555555", origin="draw"
+    )
+    service._arena_role = "challenger"
+    service.model_hrid = "ministral-3-8b"
+
+    assert service._arena_trace_tags() == [
+        "arena:challenger",
+        "arena_experiment:11111111-2222-3333-4444-555555555555",
+        "arena_origin:draw",
+        "model:ministral-3-8b",
+    ]
+    assert service._arena_trace_metadata() == {
+        "arena": "challenger",
+        "arena_experiment": "11111111-2222-3333-4444-555555555555",
+        "arena_origin": "draw",
+        "model": "ministral-3-8b",
+    }
+
+    # A side that never got a role is not an arena trace, whatever the comparison says.
+    service._arena_role = None
+    assert service._arena_trace_tags() == []
+    assert service._arena_trace_metadata() == {}
+
+
+@pytest.mark.asyncio
+async def test_arena_tags_are_appended_to_the_routing_tags(service):
+    service._langfuse_available = True
+    service._arena_comparison = SimpleNamespace(experiment_id="exp-1", origin="manual")
+    service._arena_role = "champion"
+    service.model_hrid = "mistral-small-3-2"
+
+    @contextmanager
+    def fake_observation(**_kwargs):
+        yield MagicMock()
+
+    langfuse_client = MagicMock()
+    langfuse_client.get_current_trace_id.return_value = "trace123"
+    langfuse_client.start_as_current_observation = fake_observation
+
+    async def no_events(*_args, **_kwargs):
+        if False:  # pragma: no cover - makes this an async generator
+            yield None
+
+    with (
+        patch("chat.clients.pydantic_ai.propagate_attributes") as propagate,
+        patch("chat.clients.pydantic_ai.get_client", return_value=langfuse_client),
+        patch.object(service, "_run_agent", side_effect=no_events),
+    ):
+        _ = [chunk async for chunk in service._stream_content([], force_web_search=False)]
+
+    kwargs = propagate.call_args.kwargs
+    assert kwargs["tags"][-4:] == [
+        "arena:champion",
+        "arena_experiment:exp-1",
+        "arena_origin:manual",
+        "model:mistral-small-3-2",
+    ]
+    assert kwargs["tags"][0] == "tier:complex"
+    assert kwargs["metadata"]["arena"] == "champion"
+    assert kwargs["metadata"]["model"] == "mistral-small-3-2"
+
+
 @pytest.mark.asyncio
 async def test_tags_are_passed_to_propagate_attributes(service):
     service._langfuse_available = True

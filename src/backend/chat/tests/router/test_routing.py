@@ -23,7 +23,7 @@ from chat.factories import ChatConversationFactory
 from chat.llm_configuration import LLModel, LLMProvider
 from chat.model_health import set_model_health
 from chat.models import RoutingTierSettings
-from chat.router import RoutingLabels, route_turn
+from chat.router import RoutingLabels, route_pinned_turn, route_turn
 from chat.router.routing import (
     constraint_fallback_key,
     last_answer_excerpt,
@@ -247,6 +247,43 @@ async def test_pinned_tier_bypasses_complexity_but_keeps_tags(tier_settings):
     assert decision.model_hrid == "reasoner"
     # Pinned "Raisonnement" always runs at high effort (spec 3.2).
     assert decision.reasoning_effort == ReasoningEffort.HIGH
+
+
+# --- pinned tier without the classifier (router flag off) ------------------------
+
+
+async def route_pinned(conversation, msg=None, force_web_search=False):
+    return await route_pinned_turn(
+        conversation=conversation,
+        message=msg or message(),
+        force_web_search=force_web_search,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pinned_turn_runs_the_tier_model_without_classifying(tier_settings):
+    """The selector is offered to everyone, so a pin is served with no router call."""
+    conversation = await make_conversation(pinned_tier=RoutingTier.COMPLEX)
+    with mock.patch("chat.router.routing.classify") as classify:
+        decision = await route_pinned(conversation)
+    classify.assert_not_called()
+    assert decision.tier == RoutingTier.COMPLEX
+    assert decision.tier_source == TierSource.USER
+    assert decision.reason == RoutingReason.USER_PINNED
+    assert decision.model_hrid == "reasoner"
+    # Pinned "Raisonnement" always runs at high effort (spec 3.2).
+    assert decision.reasoning_effort == ReasoningEffort.HIGH
+    # Nothing classified this turn: no labels, and no "Auto would have picked".
+    assert decision.labels is None
+    assert decision.router_would_pick is None
+
+
+@pytest.mark.asyncio
+async def test_pinned_turn_still_walks_the_constraints(tier_settings):
+    """Constraints are capabilities, not preferences: they apply to a pin too."""
+    conversation = await make_conversation(pinned_tier=RoutingTier.COMPLEX)
+    decision = await route_pinned(conversation, message(with_image=True))
+    assert decision.model_hrid == "reasoner-vision"
 
 
 # --- constraints -----------------------------------------------------------------

@@ -34,26 +34,47 @@ describe('ArenaThanks', () => {
     delete window.matchMedia;
   });
 
-  it('renders the counts and the routing sentence as a status', () => {
+  it('renders the title, the counts, and the routing sentence as a status', () => {
     render(<ArenaThanks acknowledgement={ACK} />);
 
     const card = screen.getByRole('status');
-    expect(card).toHaveTextContent(
-      'Thank you, your opinion matters. You have given 7 recent votes, out of 1,342 for this evaluation.',
-    );
+    expect(card).toHaveTextContent('Thanks, your vote is recorded');
+    expect(card).toHaveTextContent('7');
+    expect(card).toHaveTextContent('Your votes in total');
+    expect(card).toHaveTextContent('1,342');
     // Labels are i18n keys resolved through `t`.
+    expect(card).toHaveTextContent('Votes for the router.tier.standard');
     expect(card).toHaveTextContent(
-      'This vote helps choose the router.tier.standard for router.task.writing (router.domain.administrative).',
+      'This test picks the model used for router.task.writing.',
     );
-    expect(screen.queryByTestId('arena-thanks-check')).not.toBeInTheDocument();
+    expect(screen.getByTestId('arena-thanks-check')).toBeInTheDocument();
   });
 
-  it('skips the routing sentence when a label is missing', () => {
+  it('picks the tier out of the count label', () => {
+    render(<ArenaThanks acknowledgement={ACK} />);
+
+    const tier = screen.getByText('router.tier.standard');
+    expect(tier).toHaveStyle({ fontWeight: '600' });
+  });
+
+  it('falls back to a generic count label when the tier is missing', () => {
     render(<ArenaThanks acknowledgement={{ ...ACK, tier_label: null }} />);
 
-    expect(screen.getByRole('status')).not.toHaveTextContent(
-      'This vote helps choose',
+    expect(screen.getByRole('status')).toHaveTextContent('Votes on this test');
+  });
+
+  it('keeps the routing sentence when only the domain is missing', () => {
+    render(<ArenaThanks acknowledgement={{ ...ACK, domain_label: null }} />);
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'This test picks the model used for router.task.writing.',
     );
+  });
+
+  it('skips the routing sentence when the task is missing', () => {
+    render(<ArenaThanks acknowledgement={{ ...ACK, task_label: null }} />);
+
+    expect(screen.getByRole('status')).not.toHaveTextContent('This test picks');
   });
 
   it('renders the first-vote milestone with a check mark', () => {
@@ -63,7 +84,7 @@ describe('ArenaThanks', () => {
 
     const card = screen.getByRole('status');
     expect(card).toHaveTextContent('First vote, thank you!');
-    expect(card).not.toHaveTextContent('Thank you, your opinion matters');
+    expect(card).not.toHaveTextContent('Thanks, your vote is recorded');
     expect(screen.getByTestId('arena-thanks-check')).toBeInTheDocument();
   });
 

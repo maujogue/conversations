@@ -1,6 +1,7 @@
 import { UIMessage } from 'ai';
 
 import { APIError, errorCauses, fetchAPI } from '@/api';
+import { useChatPreferencesStore } from '@/features/chat/stores/useChatPreferencesStore';
 import { ChatConversation } from '@/features/chat/types';
 
 export type ArenaSide = 'left' | 'right';
@@ -17,6 +18,12 @@ const NO_ARENA: ArenaDraw = { arena: false };
 /**
  * Ask the backend whether the next turn is an arena turn. Any failure is
  * treated as "no arena": the message is then sent through the normal path.
+ *
+ * The pinned tier travels with the draw: an arena turn is routed here and its
+ * streaming requests never carry the preference (the backend picks a model per
+ * side), so this is the only request of such a turn that can record the mode
+ * the user chose. Read from the store at request time, like the streaming
+ * transport does, so the two can't drift.
  */
 export const drawArena = async (
   conversationId: string,
@@ -24,9 +31,17 @@ export const drawArena = async (
   message?: UIMessage,
 ): Promise<ArenaDraw> => {
   try {
+    const { selectedModelHrid, selectedTier } =
+      useChatPreferencesStore.getState();
     const response = await fetchAPI(`chats/${conversationId}/arena/draw/`, {
       method: 'POST',
-      body: JSON.stringify({ force_web_search: forceWebSearch, message }),
+      body: JSON.stringify({
+        force_web_search: forceWebSearch,
+        message,
+        // A raw model pin (staff debug picker) bypasses the tier on the
+        // streaming endpoint; keep the same rule here.
+        ...(selectedModelHrid ? {} : { tier: selectedTier }),
+      }),
     });
     if (!response.ok) {
       return NO_ARENA;

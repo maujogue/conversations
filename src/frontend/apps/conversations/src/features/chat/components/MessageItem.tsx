@@ -363,9 +363,13 @@ const MessageItemComponent: React.FC<MessageItemProps> = ({
     isCurrentlyStreaming &&
     !routingInfo &&
     !hasAssistantOutput;
+  // The resolved decision now sits in the action bar, next to the leaf: above
+  // the answer only the shimmer, the intro and the pin hint remain.
   const showCaption =
     message.role === 'assistant' &&
-    (!!routingInfo || isRoutingPending || hasReasoning);
+    (isRoutingPending ||
+      hasReasoning ||
+      (!!routingInfo && isLastAssistantMessage));
 
   const hasNonDocumentParsingTool = React.useMemo(
     () =>
@@ -529,10 +533,7 @@ const MessageItemComponent: React.FC<MessageItemProps> = ({
               data-testid="message-caption"
             >
               {routingInfo && isLastAssistantMessage && <RouterIntro />}
-              <RoutingCaption
-                routing={routingInfo}
-                pending={isRoutingPending}
-              />
+              {isRoutingPending && <RoutingCaption pending />}
               {showAutoHint && isLastAssistantMessage && onReturnToAuto && (
                 <WastefulPinHint onReturnToAuto={onReturnToAuto} />
               )}
@@ -755,6 +756,7 @@ const MessageItemComponent: React.FC<MessageItemProps> = ({
                   )}
                 </Box>
                 <Box $direction="row" $gap="4px" $align="center">
+                  {routingInfo && <RoutingCaption routing={routingInfo} />}
                   {co2ImpactKg !== undefined && (
                     <MessageEnergyIndicator co2ImpactKg={co2ImpactKg} />
                   )}

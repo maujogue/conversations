@@ -7,6 +7,10 @@ tier   = max(tier, minimum_tier_for(constraints))     # image, context length, w
 model  = resolve(tier)  ->  health cascade (chat/model_routing.py)
 effort = effort_for(tier, labels, pinned_tier)
 ```
+
+``route_pinned_turn`` is the same pipeline without its first line: the tier comes
+from the user's pin, so no classifier call is needed. It is what serves a pinned
+turn where the ``router`` flag is off, since the selector is offered to everyone.
 """
 
 import dataclasses
@@ -266,7 +270,6 @@ async def route_turn(  # noqa: PLR0913  # pylint: disable=too-many-arguments,too
         tier, tier_source = router_would_pick, TierSource.ROUTER
 
     common = {
-        "labels": labels,
         "router_would_pick": router_would_pick,
         "router_confidence": labels.confidence,
         "router_latency_ms": latency_ms,
@@ -286,9 +289,67 @@ async def route_turn(  # noqa: PLR0913  # pylint: disable=too-many-arguments,too
                 configuration, tier, labels, True, tier_settings.high_effort_threshold
             ),
             reason=RoutingReason.USER_PINNED,
+            labels=labels,
             **common,
         )
 
+    return await _decide(
+        tier_settings=tier_settings,
+        conversation=conversation,
+        message=message,
+        tier=tier,
+        tier_source=tier_source,
+        reason=reason,
+        labels=labels,
+        pinned=pinned_tier is not None,
+        force_web_search=force_web_search,
+        common=common,
+    )
+
+
+async def route_pinned_turn(
+    *,
+    conversation: models.ChatConversation,
+    message: UIMessage,
+    force_web_search: bool,
+) -> RoutingDecision:
+    """Decide a turn from ``conversation.pinned_tier`` alone, without the classifier.
+
+    The tier selector is offered to everyone, so an explicit choice is honoured even
+    where automatic routing is off: the ``router`` flag gates the classifier and the
+    Auto mode, not the user's own decision. Constraints and the health cascade still
+    apply, exactly as in a routed turn; only the labels are missing, so the turn
+    carries no domain or task and ``router_would_pick`` stays empty.
+    """
+    tier_settings = await sync_to_async(models.RoutingTierSettings.get_solo)()
+    return await _decide(
+        tier_settings=tier_settings,
+        conversation=conversation,
+        message=message,
+        tier=RoutingTier(conversation.pinned_tier),
+        tier_source=TierSource.USER,
+        reason=RoutingReason.USER_PINNED,
+        labels=None,
+        pinned=True,
+        force_web_search=force_web_search,
+        common={"previous_model_hrid": conversation.model_hrid or None},
+    )
+
+
+async def _decide(  # noqa: PLR0913  # pylint: disable=too-many-arguments
+    *,
+    tier_settings: models.RoutingTierSettings,
+    conversation: models.ChatConversation,
+    message: UIMessage,
+    tier: RoutingTier,
+    tier_source: TierSource,
+    reason: RoutingReason,
+    labels: RoutingLabels | None,
+    pinned: bool,
+    force_web_search: bool,
+    common: dict,
+) -> RoutingDecision:
+    """Apply the turn constraints and the health cascade to a chosen tier (spec 5.1)."""
     constraints = TurnConstraints(
         needs_image=message_has_image(message)
         or await sync_to_async(_conversation_has_image)(conversation),
@@ -314,10 +375,11 @@ async def route_turn(  # noqa: PLR0913  # pylint: disable=too-many-arguments,too
             configuration,
             tier,
             labels,
-            pinned_tier is not None,
+            pinned,
             tier_settings.high_effort_threshold,
         ),
         reason=reason,
+        labels=labels,
         **common,
     )
     logger.debug(

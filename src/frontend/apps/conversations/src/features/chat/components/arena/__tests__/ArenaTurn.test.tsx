@@ -366,7 +366,7 @@ describe('ArenaTurn', () => {
     ]);
   });
 
-  it('votes for an answer when its column is clicked', async () => {
+  it('does not vote when an answer column is clicked', async () => {
     const bodies: string[] = [];
     fetchAPIMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url.startsWith('chat-cooldown')) {
@@ -394,6 +394,11 @@ describe('ArenaTurn', () => {
     await waitFor(() => expect(voteButtons().right).toBeEnabled());
     await userEvent.click(screen.getByTestId('arena-side-right'));
 
+    // Only the two buttons of the vote bar cast a vote.
+    expect(bodies).toEqual([]);
+    expect(onVoted).not.toHaveBeenCalled();
+
+    await userEvent.click(voteButtons().right);
     await waitFor(() =>
       expect(onVoted).toHaveBeenCalledWith(CONVERSATION, null),
     );

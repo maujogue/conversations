@@ -249,6 +249,25 @@ def test_results_page_drops_what_the_langfuse_dashboard_shows(client, experiment
     for removed in ("Recorded Arena cost", "First token", "Tokens out", "CO₂ / answer"):
         assert removed not in content
     assert ">Latency<" not in content
+    # The scoreboard is the promotion decision: no observability column is left on it.
+    scoreboard = content.split("Challengers against the champion")[1].split("</table>")[0]
+    for removed in (
+        "<th>Both good</th>",
+        "<th>Both bad</th>",
+        "<th>Abandoned</th>",
+        "<th>Errored</th>",
+        "<th>Cost / answer</th>",
+        "<th>Champion cost / answer</th>",
+        "<th>Wh / answer</th>",
+        "<th>Time to vote</th>",
+        "<th>Second opinions</th>",
+    ):
+        assert removed not in scoreboard
+    for kept in ("<th>Decisive votes</th>", "<th>Cost ratio</th>", "<th>Wh ratio</th>"):
+        assert kept in scoreboard
+    # The two per-comparison figures moved to the KPI strip above the table, once.
+    assert content.count("Time to vote") == 1
+    assert content.count("Champion Wh / answer") == 1
     # What the page keeps: counts, scoreboard, energy, verdicts, position check.
     assert "Wh / answer" in content
     assert "Decisive votes" in content
@@ -258,6 +277,24 @@ def test_results_page_drops_what_the_langfuse_dashboard_shows(client, experiment
     # ... and a way out to the descriptive dashboard.
     assert "Explorer dans Langfuse" in content
     assert "https://langfuse.example.gouv.fr" in content
+    # No second opinion was asked for on this experiment: no table for them either.
+    assert "<h2>Second opinions</h2>" not in content
+
+
+def test_second_opinions_have_their_own_table(client, experiment):
+    """A different population: shown apart, never a column of the scoreboard."""
+    ArenaComparisonFactory(
+        experiment=experiment,
+        challenger_model_hrid="challenger-model",
+        origin="manual",
+        status=ArenaComparisonStatus.VOTED,
+        winner="challenger",
+    )
+
+    content = _results(client, experiment).content.decode()
+
+    table = content.split("<h2>Second opinions</h2>")[1].split("</table>")[0]
+    assert "challenger-model" in table
 
 
 def test_results_page_without_langfuse_says_so(client, experiment, settings):

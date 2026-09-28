@@ -15,6 +15,14 @@ interface ChatPreferencesState {
    * to one conversation and goes back to `auto` on a new one.
    */
   selectedTier: TierSlug;
+  /**
+   * Conversation `selectedTier` was picked for; `null` on the new-chat screen,
+   * where the pin waits for the conversation the first message creates. What
+   * makes the reset to `auto` fire on *another* conversation only, rather than
+   * on any re-run of the loader (the new-conversation handoff remounts the
+   * chat, which used to drop the tier the user had just picked).
+   */
+  tierConversationId: string | null;
   forceWebSearch: boolean;
   isDarkModePreference: boolean;
   isPanelOpen: boolean;
@@ -30,7 +38,13 @@ interface ChatPreferencesState {
    */
   autoHintShownFor: Record<string, true>;
   setSelectedModelHrid: (hrid: string | null) => void;
-  setSelectedTier: (tier: TierSlug) => void;
+  /**
+   * Pins a tier. `conversationId` says which conversation it belongs to;
+   * omitted, the current owner is kept (releasing a pin inside a conversation).
+   */
+  setSelectedTier: (tier: TierSlug, conversationId?: string | null) => void;
+  /** Hands the pending pin to the conversation the first message just created. */
+  adoptTierConversation: (conversationId: string) => void;
   setThemeModePreference: (mode: 'system' | 'light' | 'dark') => void;
   toggleDarkModePreferences: () => void;
   toggleForceWebSearch: () => void;
@@ -48,6 +62,7 @@ export const useChatPreferencesStore = create<ChatPreferencesState>()(
       themeModePreference: 'system',
       selectedModelHrid: null,
       selectedTier: 'auto',
+      tierConversationId: null,
       forceWebSearch: false,
       isDarkModePreference: false,
       isPanelOpen: false,
@@ -56,7 +71,16 @@ export const useChatPreferencesStore = create<ChatPreferencesState>()(
       hasSeenRouterIntro: false,
       autoHintShownFor: {},
       setSelectedModelHrid: (hrid) => set({ selectedModelHrid: hrid }),
-      setSelectedTier: (tier) => set({ selectedTier: tier }),
+      setSelectedTier: (tier, conversationId) =>
+        set((state) => ({
+          selectedTier: tier,
+          tierConversationId:
+            conversationId === undefined
+              ? state.tierConversationId
+              : conversationId,
+        })),
+      adoptTierConversation: (conversationId) =>
+        set({ tierConversationId: conversationId }),
       setThemeModePreference: (mode) =>
         set({
           themeModePreference: mode,

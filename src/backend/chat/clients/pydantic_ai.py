@@ -622,6 +622,36 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         }
         return {key: str(value)[:200] for key, value in values.items() if value != ""}
 
+    def _arena_trace_tags(self) -> list[str]:
+        """Langfuse trace tags of an arena side, so a vote can be sliced per model.
+
+        The ``arena_preference`` score is written on the trace (``chat/arena_scores.py``);
+        without these tags a Langfuse reader only gets the global won/lost distribution
+        and cannot tell which challenger earned it. ``model`` is the side's own HRID,
+        which is the row key of the admin scoreboard.
+        """
+        comparison = self._arena_comparison
+        if comparison is None or not self._arena_role:
+            return []
+        return [
+            f"arena:{self._arena_role}",
+            f"arena_experiment:{comparison.experiment_id}",
+            f"arena_origin:{comparison.origin}",
+            f"model:{self.model_hrid}",
+        ]
+
+    def _arena_trace_metadata(self) -> dict[str, str]:
+        """The same arena labels as metadata, for ad-hoc filtering in the Langfuse UI."""
+        comparison = self._arena_comparison
+        if comparison is None or not self._arena_role:
+            return {}
+        return {
+            "arena": str(self._arena_role),
+            "arena_experiment": str(comparison.experiment_id),
+            "arena_origin": str(comparison.origin),
+            "model": self.model_hrid,
+        }
+
     def _routing_data_part(self) -> dict | None:
         """The transient ``routing`` data part announcing the decision before the first token."""
         decision = self._routing_decision
@@ -691,8 +721,9 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                                 else {}
                             ),
                             **self._routing_trace_metadata(),
+                            **self._arena_trace_metadata(),
                         },
-                        tags=self._routing_trace_tags() or None,
+                        tags=(self._routing_trace_tags() + self._arena_trace_tags()) or None,
                     )
                 )
                 self._langfuse_span = stack.enter_context(

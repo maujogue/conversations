@@ -318,12 +318,13 @@ def test_router_on_sends_the_reasoning_effort(
 
 @freeze_time(FROZEN)
 @respx.mock
-def test_router_off_keeps_the_pinned_model_and_never_routes(
+def test_router_off_keeps_the_pinned_model_on_auto(
     api_client, mock_openai_stream, hello_conversation_data, router_off
 ):
+    """Auto is the classifier, which the flag gates: the conversation's model stands."""
     conversation = ChatConversationFactory(owner__language="en-us", model_hrid="main-model")
     with mock.patch("chat.router.routing.route_turn") as route_turn:
-        response = _post(api_client, conversation, hello_conversation_data, "?tier=simple")
+        response = _post(api_client, conversation, hello_conversation_data, "?tier=auto")
     assert response.status_code == status.HTTP_200_OK
     body = _drain(response)
     route_turn.assert_not_called()
@@ -331,7 +332,39 @@ def test_router_off_keeps_the_pinned_model_and_never_routes(
 
     conversation.refresh_from_db()
     assert conversation.model_hrid == "main-model"
-    # The tier choice is still stored so it applies once the router is on.
-    assert conversation.pinned_tier == "simple"
+    assert conversation.pinned_tier is None
     assert conversation.last_routing == {}
     assert "tier" not in (conversation.messages[-1].metadata or {})
+
+
+@freeze_time(FROZEN)
+@respx.mock
+def test_router_off_still_honours_a_pinned_tier(
+    api_client, mock_openai_stream, hello_conversation_data, router_off
+):
+    """The selector is offered to everyone, so a mode picked by hand must be served.
+
+    The flag gates automatic routing, not the user's own choice: the turn runs on
+    the tier's model with no classifier call, and says so in its caption.
+    """
+    conversation = ChatConversationFactory(owner__language="en-us", model_hrid="main-model")
+    with mock.patch("chat.router.routing.classify") as classify:
+        response = _post(api_client, conversation, hello_conversation_data, "?tier=simple")
+    assert response.status_code == status.HTTP_200_OK
+    _drain(response)
+    classify.assert_not_called()
+
+    assert json.loads(mock_openai_stream.calls.last.request.content)["model"] == "small-llm"
+    conversation.refresh_from_db()
+    assert conversation.pinned_tier == "simple"
+    assert conversation.model_hrid == "small-model"
+    metadata = conversation.messages[-1].metadata
+    assert metadata["tier"] == "simple"
+    assert metadata["tier_source"] == TierSource.USER.value
+    assert metadata["router_reason"] == RoutingReason.USER_PINNED.value
+    # No classifier ran, so the turn carries no labels and no "Auto would have picked".
+    assert (metadata["domain"], metadata["task"], metadata["router_would_pick"]) == (
+        None,
+        None,
+        None,
+    )

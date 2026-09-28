@@ -16,11 +16,11 @@ from chat.serializers import TIER_AUTO
 TIER_LEAVES = {RoutingTier.SIMPLE: 1, RoutingTier.STANDARD: 2, RoutingTier.COMPLEX: 3}
 
 # EcoLogits starting values for typical answers (router spec section 10), used until
-# `tier_energy` holds measured figures: tier 2 about 8 times and tier 3 about 10
+# `tier_energy` holds measured figures: tier 2 about 5 times and tier 3 about 10
 # times tier 1.
 DEFAULT_ENERGY_RATIOS = {
     RoutingTier.SIMPLE: 1.0,
-    RoutingTier.STANDARD: 8.0,
+    RoutingTier.STANDARD: 5.0,
     RoutingTier.COMPLEX: 10.0,
 }
 

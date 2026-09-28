@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { ReactNode, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Box, Text } from '@/components';
@@ -6,7 +6,7 @@ import { ArenaAcknowledgement } from '@/features/chat/api/useArena';
 
 /** How long the card stays fully visible before it collapses. */
 export const ARENA_THANKS_VISIBLE_MS = 5000;
-/** Duration of the slide-up / collapse transition. */
+/** Duration of the slide-in / slide-out transition. */
 const TRANSITION_MS = 300;
 const REDUCED_MOTION_MS = 150;
 
@@ -35,9 +35,9 @@ const CheckMark = ({ animate }: { animate: boolean }) => (
     data-testid="arena-thanks-check"
     $css={`
       flex: 0 0 auto;
-      width: 28px;
-      height: 28px;
-      color: var(--c--contextuals--content--semantic--success--primary, #18753c);
+      width: 22px;
+      height: 22px;
+      color: var(--c--contextuals--content--semantic--brand--primary, #5e5cd0);
 
       & circle {
         fill: none;
@@ -67,11 +67,63 @@ const CheckMark = ({ animate }: { animate: boolean }) => (
   </Box>
 );
 
+/** One clear, scannable number: the value people actually look for. */
+const Stat = ({ value, label }: { value: string; label: ReactNode }) => (
+  <Box $gap="2px" $css="min-width: 0;">
+    <Text
+      $css={`
+        color: var(--c--contextuals--content--semantic--brand--primary, #5e5cd0);
+        font-weight: 600;
+        line-height: 1.1;
+      `}
+      $size="md"
+    >
+      {value}
+    </Text>
+    <Text
+      $css="color: var(--c--contextuals--content--surface--secondary, #666); line-height: 1.1;"
+      $size="xs"
+    >
+      {label}
+    </Text>
+  </Box>
+);
+
 /**
- * "Thanks, your opinion matters" card shown under the committed answer after
- * an arena vote. It slides up, stays for about four seconds, then collapses.
- * Milestones (first, tenth, hundredth vote) get their own line and a one-off
- * check mark. Honours `prefers-reduced-motion`: no sliding, just a fade.
+ * The translated `sentence` with `needle` picked out. Splitting the finished
+ * translation keeps word order in the translators' hands: cutting the sentence
+ * into two keys around the model name would not survive another language.
+ */
+const emphasise = (sentence: string, needle: string): ReactNode => {
+  const [head, ...tail] = sentence.split(needle);
+  if (tail.length === 0) {
+    return sentence;
+  }
+  return (
+    <>
+      {head}
+      <Text
+        as="span"
+        $css={`
+          color: var(--c--contextuals--content--semantic--brand--primary, #5e5cd0);
+          font-weight: 600;
+        `}
+        $size="xs"
+      >
+        {needle}
+      </Text>
+      {tail.join(needle)}
+    </>
+  );
+};
+
+/**
+ * Vote-confirmation toast shown after an arena vote, pinned to the top-right
+ * of the viewport. Leads with a short thank-you and two scannable numbers —
+ * the votes this user has cast, and the votes everyone has cast on this
+ * experiment — rather than a sentence to read every time. Slides in, stays
+ * for about five seconds, then slides back out. Honours
+ * `prefers-reduced-motion`: no sliding, just a fade.
  */
 export const ArenaThanks = ({
   acknowledgement,
@@ -99,51 +151,41 @@ export const ArenaThanks = ({
     };
   }, [visibleMs, reduced]);
 
-  const {
-    user_votes,
-    experiment_votes,
-    tier_label,
-    task_label,
-    domain_label,
-    milestone,
-  } = acknowledgement;
+  const { user_votes, experiment_votes, tier_label, task_label, milestone } =
+    acknowledgement;
 
   const locale = i18n?.language;
   const format = (value: number) => value.toLocaleString(locale);
 
-  let main: string;
+  let title: string;
   switch (milestone) {
     case 'first_vote':
-      main = t('First vote, thank you!');
+      title = t('First vote, thank you!');
       break;
     case 'tenth_vote':
-      main = t(
-        'Ten votes already, thank you! Each one refines which model is picked.',
-      );
+      title = t('Ten votes already, thank you!');
       break;
     case 'hundredth_vote':
-      main = t(
-        'A hundred votes, thank you! Your opinions weigh heavily in choosing the models.',
-      );
+      title = t('A hundred votes, thank you!');
       break;
     default:
-      main = t(
-        'Thank you, your opinion matters. You have given {{userVotes}} recent votes, out of {{experimentVotes}} for this evaluation.',
-        {
-          userVotes: format(user_votes),
-          experimentVotes: format(experiment_votes),
-        },
-      );
+      title = t('Thanks, your vote is recorded');
   }
 
-  const routing =
-    tier_label && task_label && domain_label
-      ? t('This vote helps choose the {{tier}} for {{task}} ({{domain}}).', {
-          tier: t(tier_label),
-          task: t(task_label),
-          domain: t(domain_label),
-        })
-      : null;
+  const tier = tier_label ? t(tier_label) : null;
+
+  // Naming the tier on the count says what the vote actually decided, so the
+  // sentence below only has to carry the kind of question it applies to.
+  const experimentLabel = tier
+    ? emphasise(t('Votes for the {{tier}}', { tier }), tier)
+    : t('Votes on this test');
+
+  // The domain is left out on purpose: it read as a cryptic parenthetical.
+  const routing = task_label
+    ? t('This test picks the model used for {{task}}.', {
+        task: t(task_label),
+      })
+    : null;
 
   const visible = phase === 'shown';
   const duration = reduced ? REDUCED_MOTION_MS : TRANSITION_MS;
@@ -153,36 +195,54 @@ export const ArenaThanks = ({
       role="status"
       data-testid="arena-thanks"
       data-phase={phase}
-      $width="100%"
-      $maxWidth="var(--chat-content-max-width, 750px)"
-      $margin={{ all: 'auto' }}
       $css={`
         box-sizing: border-box;
-        overflow: hidden;
-        max-height: ${visible ? '200px' : '0'};
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        z-index: 1000;
+        max-width: 360px;
+        pointer-events: none;
         opacity: ${visible ? 1 : 0};
-        transform: ${visible || reduced ? 'none' : 'translateY(8px)'};
+        transform: ${visible || reduced ? 'none' : 'translateX(24px)'};
         transition:
-          max-height ${duration}ms ease,
           opacity ${duration}ms ease,
           transform ${duration}ms ease;
       `}
     >
       <Box
-        $direction="row"
-        $align="center"
-        $gap="12px"
-        $margin={{ top: 'sm', bottom: 'sm', left: '13px' }}
-        $padding={{ vertical: '10px', horizontal: '14px' }}
-        $radius="8px"
-        $background="var(--c--contextuals--background--surface--tertiary, #f3f2ef)"
-        $border="1px solid var(--c--contextuals--border--surface--primary, #dcdad5)"
+        $gap="10px"
+        $padding={{ vertical: '12px', horizontal: '16px' }}
+        $radius="12px"
+        $css={`
+          background: var(--c--contextuals--background--semantic--brand--tertiary, #eef1fa);
+          border: 1px solid var(--c--contextuals--background--semantic--brand--secondary, #dde2f5);
+          box-shadow: 0 4px 16px rgba(94, 92, 208, 0.12);
+        `}
       >
-        {milestone && <CheckMark animate={!reduced} />}
-        <Text $theme="neutral" $variation="secondary" $size="sm">
-          {main}
-          {routing ? ` ${routing}` : ''}
-        </Text>
+        <Box $direction="row" $align="center" $gap="8px">
+          <CheckMark animate={!reduced} />
+          <Text
+            $css="color: var(--c--contextuals--content--surface--primary, #1a1a1a); font-weight: 600;"
+            $size="sm"
+          >
+            {title}
+          </Text>
+        </Box>
+
+        <Box $direction="row" $align="center" $gap="20px">
+          <Stat value={format(user_votes)} label={t('Your votes in total')} />
+          <Stat value={format(experiment_votes)} label={experimentLabel} />
+        </Box>
+
+        {routing && (
+          <Text
+            $css="color: var(--c--contextuals--content--surface--secondary, #666);"
+            $size="xs"
+          >
+            {routing}
+          </Text>
+        )}
       </Box>
     </Box>
   );

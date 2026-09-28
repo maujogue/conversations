@@ -363,7 +363,7 @@ including non-chat entries such as the summarization model. In v1:
    "tiers": [
      {"slug": "auto",     "label_key": "router.tier.auto",     "recommended": true},
      {"slug": "simple",   "label_key": "router.tier.simple",   "leaves": 1, "energy_ratio": 1.0},
-     {"slug": "standard", "label_key": "router.tier.standard", "leaves": 2, "energy_ratio": 8.1},
+     {"slug": "standard", "label_key": "router.tier.standard", "leaves": 2, "energy_ratio": 5.1},
      {"slug": "complex",  "label_key": "router.tier.complex",  "leaves": 3, "energy_ratio": 10.4}
    ]}
   ```

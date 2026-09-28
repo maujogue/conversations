@@ -36,7 +36,7 @@ const TIERS: NonNullable<LLMConfigurationResponse['tiers']> = [
     slug: 'standard',
     label_key: 'router.tier.standard',
     leaves: 2,
-    energy_ratio: 8.1,
+    energy_ratio: 5.1,
   },
   {
     slug: 'complex',
@@ -99,7 +99,7 @@ describe('TierSelector', () => {
     expect(screen.queryByTestId('tier-selector')).not.toBeInTheDocument();
   });
 
-  it('shows the Auto chip collapsed and the four entries once opened', async () => {
+  it('offers Auto alone, the manual tiers behind one more click', async () => {
     const user = userEvent.setup();
     renderSelector();
 
@@ -110,13 +110,19 @@ describe('TierSelector', () => {
 
     const menu = screen.getByTestId('tier-selector-menu');
     expect(menu).toBeInTheDocument();
-    expect(screen.getAllByRole('menuitemradio')).toHaveLength(4);
     expect(screen.getByTestId('tier-option-auto')).toHaveTextContent(
       'Recommended',
     );
-    expect(screen.getByTestId('tier-option-auto')).toHaveTextContent(
-      'Picks the most frugal model for each question',
+    // The three manual tiers stay collapsed, as the debug picker does.
+    expect(screen.getAllByRole('menuitemradio')).toHaveLength(1);
+    expect(screen.queryByTestId('tier-option-simple')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tier-manual-toggle')).toHaveTextContent(
+      'Choose the mode myself',
     );
+
+    await user.click(screen.getByTestId('tier-manual-toggle'));
+
+    expect(screen.getAllByRole('menuitemradio')).toHaveLength(4);
     expect(screen.getByTestId('tier-option-simple')).toHaveTextContent('Fast');
     expect(screen.getByTestId('tier-option-standard')).toHaveTextContent(
       'Balanced',
@@ -124,19 +130,71 @@ describe('TierSelector', () => {
     expect(screen.getByTestId('tier-option-complex')).toHaveTextContent(
       'Reasoning',
     );
-    // Energy sentence with the rounded ratio, on standard and complex only.
-    expect(screen.getByTestId('tier-option-standard')).toHaveTextContent(
-      'About 8 times more energy than a fast answer.',
-    );
-    expect(screen.getByTestId('tier-option-complex')).toHaveTextContent(
-      'About 10 times more energy than a fast answer.',
-    );
-    expect(screen.getByTestId('tier-option-simple')).not.toHaveTextContent(
-      'more energy',
-    );
     // No model name anywhere.
     expect(menu).not.toHaveTextContent('Model A');
     expect(screen.queryByTestId('tier-debug-section')).not.toBeInTheDocument();
+  });
+
+  it('grades the manual tiers by leaf colour, with no figure on the entry', async () => {
+    const user = userEvent.setup();
+    renderSelector();
+
+    await user.click(screen.getByTestId('tier-selector-chip'));
+    await user.click(screen.getByTestId('tier-manual-toggle'));
+
+    // The multiplier belongs to the tooltip, never to the entry.
+    expect(screen.getByTestId('tier-option-standard')).not.toHaveTextContent(
+      '×',
+    );
+    expect(screen.getByTestId('tier-option-standard')).toHaveAttribute(
+      'aria-label',
+      'Balanced — 5 times the energy of a fast answer',
+    );
+    expect(screen.getByTestId('tier-option-complex')).toHaveAttribute(
+      'aria-label',
+      'Reasoning — 10 times the energy of a fast answer',
+    );
+  });
+
+  it('opens the manual section straight away on a manual tier', async () => {
+    const user = userEvent.setup();
+    renderSelector({ selectedTier: 'complex' });
+
+    await user.click(screen.getByTestId('tier-selector-chip'));
+
+    expect(screen.getByTestId('tier-option-complex')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+  });
+
+  it('splits the hovered tier into use case and consumption', async () => {
+    const user = userEvent.setup();
+    renderSelector();
+
+    await user.click(screen.getByTestId('tier-selector-chip'));
+    await user.click(screen.getByTestId('tier-manual-toggle'));
+
+    expect(screen.getByTestId('tier-option-standard')).not.toHaveTextContent(
+      'Writing, summaries, explanations',
+    );
+    expect(screen.queryByTestId('tier-hint')).not.toBeInTheDocument();
+
+    await user.hover(screen.getByTestId('tier-option-standard'));
+
+    const hint = screen.getByTestId('tier-hint');
+    expect(hint).toHaveTextContent('What it is for');
+    expect(hint).toHaveTextContent('Writing, summaries, explanations');
+    expect(hint).toHaveTextContent('Consumption');
+    expect(hint).toHaveTextContent('About 5 times a fast answer.');
+
+    await user.hover(screen.getByTestId('tier-option-simple'));
+    expect(screen.getByTestId('tier-hint')).toHaveTextContent(
+      'The reference: the lightest answer there is.',
+    );
+
+    await user.unhover(screen.getByTestId('tier-option-simple'));
+    expect(screen.queryByTestId('tier-hint')).not.toBeInTheDocument();
   });
 
   it('emits the picked tier and closes', async () => {
@@ -144,6 +202,7 @@ describe('TierSelector', () => {
     const { onTierSelect } = renderSelector();
 
     await user.click(screen.getByTestId('tier-selector-chip'));
+    await user.click(screen.getByTestId('tier-manual-toggle'));
     await user.click(screen.getByTestId('tier-option-complex'));
 
     expect(onTierSelect).toHaveBeenCalledWith('complex');

@@ -81,7 +81,7 @@ def test_regular_user_gets_tiers_only(api_client, llm_configurations, picker_fla
                 "slug": "standard",
                 "label_key": "router.tier.standard",
                 "leaves": 2,
-                "energy_ratio": 8.0,
+                "energy_ratio": 5.0,
             },
             {
                 "slug": "complex",
@@ -165,7 +165,7 @@ def test_staff_without_flag_get_no_models(api_client, llm_configurations, picker
 @pytest.mark.parametrize(
     "tier_energy,tier,expected",
     [
-        ({}, RoutingTier.STANDARD, 8.0),
+        ({}, RoutingTier.STANDARD, 5.0),
         ({"simple": {"wh_per_answer": 1.0}}, RoutingTier.COMPLEX, 10.0),
         (
             {"simple": {"wh_per_answer": 0}, "complex": {"wh_per_answer": 5}},

@@ -137,6 +137,7 @@ export const Chat = ({
     setSelectedModelHrid,
     selectedTier,
     setSelectedTier,
+    adoptTierConversation,
     setSourcesPanelOpen,
   } = useChatPreferencesStore();
 
@@ -166,6 +167,10 @@ export const Chat = ({
   // A second opinion is being requested: the button waits for the endpoint.
   const [secondOpinionPending, setSecondOpinionPending] = useState(false);
   const [arenaStreaming, setArenaStreaming] = useState(false);
+  // The question is on screen and the backend is still deciding how to answer
+  // it (the arena draw routes the turn, which costs about a second). Holds the
+  // id of the optimistic user message so the view can scroll to it.
+  const [drawingTurnId, setDrawingTurnId] = useState<string | null>(null);
   // Figures of the last vote, shown in the thanks card under the committed
   // answer once `ArenaTurn` is gone; cleared when the card has collapsed.
   const [arenaThanks, setArenaThanks] = useState<ArenaAcknowledgement | null>(
@@ -208,10 +213,23 @@ export const Chat = ({
   }, [llmConfig, selectedModelHrid, setSelectedModelHrid]);
 
   const handleTierSelect = (tier: TierSlug) => {
-    setSelectedTier(tier);
+    // The pin belongs to the conversation it was made in; `null` on the
+    // new-chat screen, where it is handed over once the conversation exists.
+    setSelectedTier(tier, conversationId ?? null);
     // A tier choice releases the debug model pin.
     setSelectedModelHrid(null);
   };
+
+  // A tier choice applies to one conversation: opening another one (or the
+  // new-chat screen) goes back to Auto. Keyed on the conversation the pin was
+  // made for, not on this effect running: the new-conversation handoff remounts
+  // the chat with the id it just created, and the pin travels with it.
+  useEffect(() => {
+    const { tierConversationId } = useChatPreferencesStore.getState();
+    if (tierConversationId !== (initialConversationId ?? null)) {
+      setSelectedTier('auto', initialConversationId ?? null);
+    }
+  }, [initialConversationId, setSelectedTier]);
 
   const handleDebugModelSelect = (model: LLMModel) => {
     setSelectedModelHrid(model.hrid);
@@ -880,10 +898,6 @@ export const Chat = ({
     // reset would wipe the project it just assigned.
     if (!(initialConversationId && pendingInput)) {
       setConversationProjectId(null);
-      // A tier choice applies to one conversation: back to Auto on another
-      // one (or on the new-chat screen). Kept across the creation handoff so
-      // the tier picked before the first message travels with it.
-      setSelectedTier('auto');
     }
     let dismissedFromStorage = false;
     if (initialConversationId && typeof window !== 'undefined') {
@@ -1157,6 +1171,9 @@ export const Chat = ({
   ) => {
     hasSentRef.current = true;
     const fileParts = toFileParts(attachments);
+    // Clearing the composer is the first feedback the user gets: it must not
+    // wait for the draw below.
+    setInput('');
     if (arenaEnabled && targetConversationId) {
       const userMessageId = `arena-user-${Date.now()}`;
       const userMessage: UIMessage = {
@@ -1164,25 +1181,30 @@ export const Chat = ({
         role: 'user',
         parts: [{ type: 'text', text }, ...fileParts],
       };
+      // The draw routes the turn server-side, which takes about a second. Put
+      // the question on screen and start the "Choosing the model…" caption
+      // right away rather than leaving the composer frozen until it answers.
+      setMessages((prev) => [...prev, userMessage]);
+      setDrawingTurnId(userMessageId);
       const draw = await drawArena(
         targetConversationId,
         forceWebSearch,
         userMessage,
-      );
+      ).finally(() => setDrawingTurnId(null));
       if (draw.arena) {
-        setMessages((prev) => [...prev, userMessage]);
         setArena({
           comparisonId: draw.comparison_id,
           userText: text,
           files: fileParts,
           userMessageId,
         });
-        setInput('');
         return;
       }
+      // A normal turn: `sendMessage` appends its own copy of the question, so
+      // the optimistic one goes away in the same update - no flicker.
+      setMessages((prev) => prev.filter((m) => m.id !== userMessageId));
     }
     void sendMessage({ text, files: fileParts });
-    setInput('');
   };
 
   // Custom submit to include attachments and handle chat creation
@@ -1287,6 +1309,10 @@ export const Chat = ({
             setConversationProjectId(pendingProjectId ?? null);
             setProjectId(null);
             setConversationId(data.id);
+            // The tier picked before the first message was pinned on the
+            // new-chat screen: hand it to the conversation it created, so the
+            // remount at /chat/<id> keeps it instead of resetting to Auto.
+            adoptTierConversation(data.id);
             // Update the URL to /chat/<id>
             void navigate(`/chat/${data.id}`);
             // After setting the conversationId, submit the pending message
@@ -1347,9 +1373,10 @@ export const Chat = ({
     }, 100);
   };
 
-  // An arena turn never puts the main chat in `submitted`, so the scroll to
-  // the question above does not fire: do it here when the split opens.
-  const arenaUserMessageId = arena?.userMessageId;
+  // Neither the draw nor an arena turn puts the main chat in `submitted`, so
+  // the scroll to the question above does not fire: do it here, as soon as the
+  // question is on screen and again when the split opens.
+  const arenaUserMessageId = arena?.userMessageId ?? drawingTurnId;
   useEffect(() => {
     if (!arenaUserMessageId) {
       return;
@@ -1506,8 +1533,18 @@ export const Chat = ({
         )}
         {!aprilFools.isActive &&
         !arena &&
-        ((status !== 'ready' && status !== 'streaming' && status !== 'error') ||
-          isUploadingFiles) ? (
+        // This block stands in for the answer bubble until it exists. The
+        // stream creates that bubble on its `start` event while the status is
+        // still `submitted`, and the bubble carries its own caption from then
+        // on: keeping this one up too showed "Choosing the model…" twice.
+        ((status !== 'ready' &&
+          status !== 'streaming' &&
+          status !== 'error' &&
+          messages.at(-1)?.role !== 'assistant') ||
+          isUploadingFiles ||
+          // The turn is being routed: the caption stands under the question
+          // from the moment it is sent, not from the first streamed byte.
+          !!drawingTurnId) ? (
           <Box
             $direction="row"
             $align="start"

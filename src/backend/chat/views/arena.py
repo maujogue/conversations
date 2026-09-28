@@ -18,6 +18,7 @@ from core.feature_flags.helpers import is_feature_enabled
 
 from chat import arena as arena_service
 from chat import models, serializers
+from chat.serializers import TIER_AUTO
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,18 @@ class ArenaMixin:
         force_web_search = serializer.validated_data["force_web_search"]
         message = serializer.validated_data.get("message")
 
+        # A manual tier choice applies to the conversation until changed, exactly as
+        # on the streaming endpoint. It has to be applied here too: the streaming
+        # request of an arena turn runs in arena mode and never reaches that code, so
+        # a pin made on an arena turn would otherwise never be recorded, and the
+        # routing below would draw the comparison for the tier the router picked.
+        requested_tier = serializer.validated_data["tier"]
+        if requested_tier is not None:
+            conversation.pinned_tier = None if requested_tier == TIER_AUTO else requested_tier
+            # `updated_at` is auto_now and deliberately left out: drawing is not a
+            # turn, the stream that follows bumps the conversation.
+            conversation.save(update_fields=["pinned_tier"])
+
         # The experiment is chosen by the turn's tier, so the turn is routed here and
         # the decision travels to the comparison. The streaming request that follows
         # runs in arena mode and does not route again.
@@ -65,6 +78,15 @@ class ArenaMixin:
                 message,
                 force_web_search=force_web_search,
                 requested_model_hrid=None,
+            )
+        elif message is not None and conversation.pinned_tier:
+            # Router off, tier pinned by hand: the comparison still belongs to that
+            # tier, so it is drawn from the tier's experiment against the tier's
+            # challengers rather than from the single unrouted experiment.
+            routing_decision = self._route_pinned_turn(
+                conversation,
+                message,
+                force_web_search=force_web_search,
             )
 
         comparison = arena_service.draw_comparison(

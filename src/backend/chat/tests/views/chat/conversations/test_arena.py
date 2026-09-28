@@ -903,3 +903,181 @@ def test_draw_routes_the_turn_and_matches_the_experiment_tier(
             "hr",
             "summarization",
         )
+
+
+# --- the pinned tier on an arena turn -------------------------------------------------
+
+
+@pytest.fixture
+def every_tier_configured(tier_settings):
+    """A model on every tier: without one a tier falls through to the constraint
+    fallback, which would mask the tier these tests are about."""
+    tier_settings.simple_model_hrid = "main-model"
+    tier_settings.complex_model_hrid = "challenger-model"
+    tier_settings.save()
+    return tier_settings
+
+
+@pytest.fixture
+def router_on(settings, every_tier_configured):
+    """Arena and router both on: the draw routes the turn itself."""
+    settings.FEATURE_FLAGS = FeatureFlags(arena=FeatureToggle.ENABLED, router=FeatureToggle.ENABLED)
+    return every_tier_configured
+
+
+@pytest.fixture
+def router_off(settings, every_tier_configured):
+    """Arena on, automatic routing off: only a hand-pinned tier decides the turn."""
+    settings.FEATURE_FLAGS = FeatureFlags(
+        arena=FeatureToggle.ENABLED, router=FeatureToggle.DISABLED
+    )
+    return every_tier_configured
+
+
+def _classify_returning(labels):
+    async def fake_classify(*_args, **_kwargs):
+        return labels, RoutingReason.CLASSIFIED.value, 42, "7"
+
+    return patch("chat.router.routing.classify", side_effect=fake_classify)
+
+
+ROUTER_WOULD_PICK_SIMPLE = RoutingLabels(
+    complexity=RoutingTier.SIMPLE,
+    domain=RoutingDomain.HR,
+    task=RoutingTask.SUMMARIZATION,
+    confidence=0.95,
+)
+
+DRAW_MESSAGE = {"id": "u1", "role": "user", "parts": [{"type": "text", "text": "Hi"}]}
+
+
+def test_draw_applies_the_tier_the_user_pinned(api_client, experiment, router_on):
+    """The composer's tier travels with the draw and routes the comparison.
+
+    An arena turn is routed here and its two streaming requests never carry the
+    preference (the backend picks a model per side), so a tier pinned on such a
+    turn would otherwise be ignored: the comparison would be drawn for the tier
+    the classifier picked, and the pin never recorded on the conversation.
+    """
+    conversation = ChatConversationFactory()
+    api_client.force_login(conversation.owner)
+    captured = {}
+
+    def capture(*, routing_decision, **_kwargs):
+        # Returning None is "no comparison drawn": these tests are about the
+        # decision handed to the draw, not about the comparison it builds.
+        captured["decision"] = routing_decision
+
+    with (
+        _classify_returning(ROUTER_WOULD_PICK_SIMPLE),
+        patch.object(arena, "draw_comparison", side_effect=capture),
+    ):
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": DRAW_MESSAGE, "tier": "complex"},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    conversation.refresh_from_db()
+    assert conversation.pinned_tier == "complex"
+    decision = captured["decision"]
+    assert (decision.tier, decision.tier_source) == (RoutingTier.COMPLEX, TierSource.USER)
+    assert decision.router_would_pick == RoutingTier.SIMPLE
+
+
+def test_draw_with_auto_releases_the_pin(api_client, experiment, router_on):
+    """`auto` hands the decision back to the router, as on the streaming endpoint."""
+    conversation = ChatConversationFactory(pinned_tier=RoutingTier.COMPLEX)
+    api_client.force_login(conversation.owner)
+    captured = {}
+
+    def capture(*, routing_decision, **_kwargs):
+        # Returning None is "no comparison drawn": these tests are about the
+        # decision handed to the draw, not about the comparison it builds.
+        captured["decision"] = routing_decision
+
+    with (
+        _classify_returning(ROUTER_WOULD_PICK_SIMPLE),
+        patch.object(arena, "draw_comparison", side_effect=capture),
+    ):
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": DRAW_MESSAGE, "tier": "auto"},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    conversation.refresh_from_db()
+    assert conversation.pinned_tier is None
+    assert captured["decision"].tier_source == TierSource.ROUTER
+
+
+def test_draw_without_tier_leaves_the_pin_alone(api_client, experiment, router_on):
+    """A client that sends no tier (pre-router shape) must not release a pin."""
+    conversation = ChatConversationFactory(pinned_tier=RoutingTier.COMPLEX)
+    api_client.force_login(conversation.owner)
+
+    with (
+        _classify_returning(ROUTER_WOULD_PICK_SIMPLE),
+        patch.object(arena, "draw_comparison", side_effect=lambda **_kwargs: None),
+    ):
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": DRAW_MESSAGE},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    conversation.refresh_from_db()
+    assert conversation.pinned_tier == RoutingTier.COMPLEX
+
+
+def test_draw_is_tier_specific_when_the_tier_is_pinned_and_the_router_off(
+    api_client, experiment, router_off
+):
+    """A pinned tier picks the experiment even where automatic routing is off.
+
+    The selector is offered to everyone, so the comparison has to belong to the
+    mode the user chose: the standard-tier experiment here, rather than "the one
+    active experiment" an unrouted turn would otherwise fall back to.
+    """
+    conversation = ChatConversationFactory()
+    api_client.force_login(conversation.owner)
+
+    with patch("chat.router.routing.classify") as classify:
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": DRAW_MESSAGE, "tier": "standard"},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["arena"] is True
+    classify.assert_not_called()
+    comparison = ArenaComparison.objects.get()
+    assert comparison.experiment == experiment
+    assert comparison.tier == "standard"
+    assert comparison.tier_source == TierSource.USER.value
+    assert comparison.champion_model_hrid == "main-model"
+
+
+def test_draw_skips_a_tier_with_no_experiment_instead_of_comparing_on_another(
+    api_client, experiment, router_off
+):
+    """Only the pinned tier's experiment may draw: no experiment, no comparison."""
+    conversation = ChatConversationFactory()
+    api_client.force_login(conversation.owner)
+
+    with patch("chat.router.routing.classify") as classify:
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": DRAW_MESSAGE, "tier": "complex"},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    # The only active experiment is the standard-tier one: a complex turn is normal.
+    assert response.json() == {"arena": False}
+    classify.assert_not_called()
+    assert not ArenaComparison.objects.exists()

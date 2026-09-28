@@ -362,6 +362,17 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
                     force_web_search=force_web_search,
                     requested_model_hrid=requested_model_hrid,
                 )
+            elif conversation.pinned_tier and not requested_model_hrid:
+                # Router off, but the user picked a mode: the selector is offered to
+                # everyone, so the choice runs on the tier's model. Only Auto, which
+                # needs the classifier, is unavailable here.
+                routing_decision = self._route_pinned_turn(
+                    conversation,
+                    messages[-1],
+                    force_web_search=force_web_search,
+                )
+
+            if routing_decision is not None:
                 conversation.model_hrid = routing_decision.model_hrid
                 conversation.last_routing = routing_service.last_routing_payload(routing_decision)
                 update_fields += ["model_hrid", "last_routing"]
@@ -419,6 +430,20 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
     def _model_picker_allowed(user) -> bool:
         """Whether `model_hrid` may be honoured: staff with the dev picker flag."""
         return bool(user.is_staff) and is_feature_enabled(user, "dev_model_picker")
+
+    @staticmethod
+    def _route_pinned_turn(conversation, message, *, force_web_search):
+        """Resolve the turn from the user's pinned tier, without the classifier.
+
+        The tier selector is shown to everyone, so a pinned tier is honoured even
+        where the ``router`` flag is off: the flag gates automatic routing, not an
+        explicit choice. The view is sync; the router is async.
+        """
+        return async_to_sync(routing_service.route_pinned_turn)(
+            conversation=conversation,
+            message=message,
+            force_web_search=force_web_search,
+        )
 
     @staticmethod
     def _route_turn(conversation, message, *, force_web_search, requested_model_hrid):

@@ -2,6 +2,6 @@
 
 from .classifier import classify
 from .labels import RoutingDecision, RoutingLabels
-from .routing import route_turn
+from .routing import route_pinned_turn, route_turn
 
-__all__ = ["RoutingDecision", "RoutingLabels", "classify", "route_turn"]
+__all__ = ["RoutingDecision", "RoutingLabels", "classify", "route_pinned_turn", "route_turn"]
