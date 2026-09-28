@@ -83,8 +83,24 @@ def test_add_dynamic_system_prompt():
     assert agent._instructions[2]() == "Answer in french."
 
 
-def test_agent_is_web_search_configured():
-    """Test whether web search backend is configured on the model."""
+def test_agent_is_web_search_configured(settings):
+    """Web search is not configured when LLModel.web_search is unset."""
+    settings.LLM_CONFIGURATIONS = {
+        "default-model": LLModel(
+            hrid="default-model",
+            model_name="model-123",
+            human_readable_name="Default Model",
+            is_active=True,
+            icon=None,
+            system_prompt="You are a helpful assistant",
+            tools=[],
+            provider=LLMProvider(
+                hrid="default-provider",
+                base_url="https://api.llm.com/v1/",
+                api_key="test-key",
+            ),
+        ),
+    }
     agent = ConversationAgent(model_hrid="default-model")
     assert agent.is_web_search_configured() is False
 

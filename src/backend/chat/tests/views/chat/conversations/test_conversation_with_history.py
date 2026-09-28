@@ -329,7 +329,7 @@ def test_post_conversation_data_protocol_with_history(
         'data: {"type":"text-delta","id":"0","delta":" there"}\n\n'
         'data: {"type":"text-end","id":"0"}\n\n'
         'data: {"type":"finish","messageMetadata":{"usage":{"promptTokens":0,"completionToken'
-        's":0,"co2Impact":0.0}}}\n\n'
+        's":0,"co2Impact":0.00001},"co2_impact":0.00001}}\n\n'
         "data: [DONE]\n\n"
     )
 
@@ -375,6 +375,8 @@ def test_post_conversation_data_protocol_with_history(
         content="Hello there",
         role="assistant",
         parts=[TextUIPart(type="text", text="Hello there")],
+        # The mocked Albert stream reports `impacts.kgCO2eq`, stored on the answer.
+        metadata={"co2_impact": 1e-05},
     )
 
     # Verify that the pydantic_messages were appended correctly
@@ -1158,7 +1160,7 @@ def test_post_conversation_with_existing_image_history(
         'data: {"type":"text-delta","id":"0","delta":" there"}\n\n'
         'data: {"type":"text-end","id":"0"}\n\n'
         'data: {"type":"finish","messageMetadata":{"usage":{"promptTokens":0,"completionToken'
-        's":0,"co2Impact":0.0}}}\n\n'
+        's":0,"co2Impact":0.00001},"co2_impact":0.00001}}\n\n'
         "data: [DONE]\n\n"
     )
 
@@ -1205,6 +1207,8 @@ def test_post_conversation_with_existing_image_history(
         content="Hello there",
         role="assistant",
         parts=[TextUIPart(type="text", text="Hello there")],
+        # The mocked Albert stream reports `impacts.kgCO2eq`, stored on the answer.
+        metadata={"co2_impact": 1e-05},
     )
 
     # Verify that the pydantic_messages were appended correctly
@@ -1355,7 +1359,7 @@ def test_post_conversation_with_existing_tool_history(
             "finish_reason": "tool_calls",
             "timestamp": "2025-07-25T10:36:35.297675Z",
         },
-        "provider_name": "openai",
+        "provider_name": "albert_openai",
         "provider_response_id": "chatcmpl-tool-call",
         "provider_url": "https://www.external-ai-service.com/",
         "state": "complete",
@@ -1419,7 +1423,7 @@ def test_post_conversation_with_existing_tool_history(
             "finish_reason": "stop",
             "timestamp": "2025-07-25T10:36:35.297675Z",
         },
-        "provider_name": "openai",
+        "provider_name": "albert_openai",
         "provider_response_id": "chatcmpl-final",
         "provider_url": "https://www.external-ai-service.com/",
         "state": "complete",

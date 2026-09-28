@@ -38,6 +38,9 @@ def test_chat_conversation_request_serializer_default():
     assert serializer.validated_data == {
         "force_web_search": False,
         "model_hrid": None,
+        "tier": None,
+        "arena_comparison": None,
+        "arena_side": None,
     }
 
 

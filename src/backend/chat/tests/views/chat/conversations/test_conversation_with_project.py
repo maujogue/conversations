@@ -21,7 +21,7 @@ _HELLO_THERE_STREAM = (
     'data: {"type":"text-delta","id":"0","delta":" there"}\n\n'
     'data: {"type":"text-end","id":"0"}\n\n'
     'data: {"type":"finish","messageMetadata":{"usage":{"promptTokens":0,"completionTokens":0'
-    ',"co2Impact":0.0}}}\n\n'
+    ',"co2Impact":0.00001},"co2_impact":0.00001}}\n\n'
     "data: [DONE]\n\n"
 )
 

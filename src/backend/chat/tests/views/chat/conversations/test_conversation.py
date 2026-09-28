@@ -77,6 +77,9 @@ def _assert_hello_messages(chat_conversation, frozen_now):
         content="Hello there",
         role="assistant",
         parts=[TextUIPart(type="text", text="Hello there")],
+        # The mocked Albert stream reports `impacts.kgCO2eq`, which is stored
+        # on the answer (see test_conversations_with_co2_impact.py).
+        metadata={"co2_impact": 1e-05},
     )
 
 
@@ -104,6 +107,7 @@ def _make_pydantic_text_response(  # pylint: disable=too-many-arguments,too-many
     provider_url="https://www.external-ai-service.com/",
     usage=None,
     conversation_id=ANY,
+    provider_name="albert_openai",
 ):
     return {
         "conversation_id": conversation_id,
@@ -121,7 +125,7 @@ def _make_pydantic_text_response(  # pylint: disable=too-many-arguments,too-many
             }
         ],
         "provider_details": {"finish_reason": "stop", "timestamp": timestamp},
-        "provider_name": "openai",
+        "provider_name": provider_name,
         "provider_response_id": provider_response_id,
         "provider_url": provider_url,
         "state": "complete",
@@ -152,7 +156,24 @@ def _decode_stream(response):
     return replace_uuids_with_placeholder(b"".join(response.streaming_content).decode("utf-8"))
 
 
+# The mocked Albert stream reports `impacts.kgCO2eq` (1e-05 kg), which the Albert
+# model subclass keeps in `usage.details` scaled by 10^20.
+ALBERT_CO2_USAGE = {**ZERO_USAGE, "details": {"co2_impact_factor_20": 10**15}}
+
 HELLO_STREAM_CONTENT = (
+    'data: {"type":"start","messageId":"<mocked_uuid>"}\n\n'
+    'data: {"type":"text-start","id":"0"}\n\n'
+    'data: {"type":"text-delta","id":"0","delta":"Hello"}\n\n'
+    'data: {"type":"text-delta","id":"0","delta":" there"}\n\n'
+    'data: {"type":"text-end","id":"0"}\n\n'
+    'data: {"type":"finish","messageMetadata":{"usage":{"promptTokens":0,"completionTokens":0'
+    ',"co2Impact":0.00001},"co2_impact":0.00001}}\n\n'
+    "data: [DONE]\n\n"
+)
+
+# Same stream, for the tests that pin a provider without Albert's CO2 handling:
+# no figure is reported, so the metadata carries a plain zero and no `co2_impact`.
+HELLO_STREAM_CONTENT_WITHOUT_CO2 = (
     'data: {"type":"start","messageId":"<mocked_uuid>"}\n\n'
     'data: {"type":"text-start","id":"0"}\n\n'
     'data: {"type":"text-delta","id":"0","delta":"Hello"}\n\n'
@@ -233,7 +254,7 @@ def test_post_conversation_data_protocol(api_client, mock_openai_stream, hello_c
     _run_id = chat_conversation.pydantic_messages[0]["run_id"]
     assert chat_conversation.pydantic_messages == [
         _make_pydantic_request(_run_id, ENGLISH_INSTRUCTIONS, ["Hello"]),
-        _make_pydantic_text_response(_run_id, "Hello there"),
+        _make_pydantic_text_response(_run_id, "Hello there", usage=ALBERT_CO2_USAGE),
     ]
 
 
@@ -268,7 +289,7 @@ def test_post_conversation_data_protocol_drops_keepalive_after_the_terminator(
         'data: {"type":"text-delta","id":"0","delta":" there"}\n\n'
         'data: {"type":"text-end","id":"0"}\n\n'
         'data: {"type":"finish","messageMetadata":{"usage":{"promptTokens":0,"completionToken'
-        's":0,"co2Impact":0.0}}}\n\n'
+        's":0,"co2Impact":0.00001},"co2_impact":0.00001}}\n\n'
         "data: [DONE]\n\n"
     )
 
@@ -281,7 +302,7 @@ def test_post_conversation_data_protocol_drops_keepalive_after_the_terminator(
     _run_id = chat_conversation.pydantic_messages[0]["run_id"]
     assert chat_conversation.pydantic_messages == [
         _make_pydantic_request(_run_id, ENGLISH_INSTRUCTIONS, ["Hello"]),
-        _make_pydantic_text_response(_run_id, "Hello there"),
+        _make_pydantic_text_response(_run_id, "Hello there", usage=ALBERT_CO2_USAGE),
     ]
 
 
@@ -553,7 +574,7 @@ def test_post_conversation_tool_call(api_client, mock_openai_stream_tool, settin
                 "finish_reason": "tool_calls",
                 "timestamp": FROZEN_TIMESTAMP,
             },
-            "provider_name": "openai",
+            "provider_name": "albert_openai",
             "provider_response_id": "chatcmpl-tool-call",
             "provider_url": "https://www.external-ai-service.com/",
             "state": "complete",
@@ -595,7 +616,12 @@ def test_post_conversation_tool_call(api_client, mock_openai_stream_tool, settin
 def test_post_conversation_tool_call_fails(api_client, mock_openai_stream_tool):
     """Ensure tool calls are correctly forwarded and streamed back when failing."""
 
-    chat_conversation = ChatConversationFactory(owner__language="fr-fr")
+    # ``allow_smart_web_search`` is a random boolean on the factory: pin it off so the
+    # optional ``web_search`` tool is always filtered out of the run and the tool list
+    # quoted in the "Unknown tool name" retry prompt below is deterministic.
+    chat_conversation = ChatConversationFactory(
+        owner__language="fr-fr", owner__allow_smart_web_search=False
+    )
     url = f"/api/v1.0/chats/{chat_conversation.pk}/conversation/"
 
     data = {
@@ -713,7 +739,7 @@ def test_post_conversation_tool_call_fails(api_client, mock_openai_stream_tool):
                 "finish_reason": "tool_calls",
                 "timestamp": FROZEN_TIMESTAMP,
             },
-            "provider_name": "openai",
+            "provider_name": "albert_openai",
             "provider_response_id": "chatcmpl-tool-call",
             "provider_url": "https://www.external-ai-service.com/",
             "state": "complete",
@@ -814,7 +840,7 @@ def test_post_conversation_model_selection_new(
 
     response_content = _decode_stream(response)
 
-    assert response_content == HELLO_STREAM_CONTENT
+    assert response_content == HELLO_STREAM_CONTENT_WITHOUT_CO2
 
     # We check the model used in the outgoing request to the AI service
     assert json.loads(mock_openai_stream.calls.last.request.content)["model"] == "plop-model"
@@ -968,6 +994,7 @@ def test_post_conversation_data_protocol_no_stream(
             provider_response_id="chatcmpl-92c413bb5a45426299335d0621324654",
             provider_url="https://www.external-ai-service.com",
             usage={**ZERO_USAGE, "output_tokens": 135},
+            provider_name="openai",
         )
         | {
             "provider_details": {
@@ -1043,12 +1070,14 @@ async def test_post_conversation_async(api_client, mock_openai_stream, monkeypat
         content="Hello there",
         role="assistant",
         parts=[TextUIPart(type="text", text="Hello there")],
+        # The mocked Albert stream reports `impacts.kgCO2eq`, stored on the answer.
+        metadata={"co2_impact": 1e-05},
     )
 
     _run_id = chat_conversation.pydantic_messages[0]["run_id"]
     assert chat_conversation.pydantic_messages == [
         _make_pydantic_request(_run_id, ENGLISH_INSTRUCTIONS, ["Hello"]),
-        _make_pydantic_text_response(_run_id, "Hello there"),
+        _make_pydantic_text_response(_run_id, "Hello there", usage=ALBERT_CO2_USAGE),
     ]
 
 
@@ -1104,7 +1133,7 @@ async def test_post_conversation_async_triggers_keepalive(
         'data: {"type":"text-delta","id":"0","delta":" there"}\n\n'
         'data: {"type":"text-end","id":"0"}\n\n'
         'data: {"type":"finish","messageMetadata":{"usage":{"promptTokens":0,"completionToken'
-        's":0,"co2Impact":0.0}}}\n\n'
+        's":0,"co2Impact":0.00001},"co2_impact":0.00001}}\n\n'
         "data: [DONE]\n\n"
     )
 
@@ -1131,6 +1160,8 @@ async def test_post_conversation_async_triggers_keepalive(
         content="Hello there",
         role="assistant",
         parts=[TextUIPart(type="text", text="Hello there")],
+        # The mocked Albert stream reports `impacts.kgCO2eq`, stored on the answer.
+        metadata={"co2_impact": 1e-05},
     )
 
     _run_id = chat_conversation.pydantic_messages[0]["run_id"]
@@ -1138,7 +1169,7 @@ async def test_post_conversation_async_triggers_keepalive(
     # using ANY because time is not frozen in this api mock
     assert chat_conversation.pydantic_messages == [
         _make_pydantic_request(_run_id, ENGLISH_INSTRUCTIONS, ["Hello"], timestamp=ANY),
-        _make_pydantic_text_response(_run_id, "Hello there", timestamp=ANY),
+        _make_pydantic_text_response(_run_id, "Hello there", timestamp=ANY, usage=ALBERT_CO2_USAGE),
     ]
 
 

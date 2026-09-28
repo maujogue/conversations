@@ -14,6 +14,7 @@ from pydantic_ai.messages import (
 )
 
 from chat.clients.pydantic_ai import AIAgentService
+from chat.clients.schema import TurnMetrics
 from chat.llm_configuration import LLModel
 
 USAGE = {"promptTokens": 10, "completionTokens": 5, "co2_impact": 0}
@@ -45,6 +46,11 @@ def service_fixture(conversation):
             tools=[],
         )
     )
+    # Set by __init__: the method under test reads them (through _routing_metadata()
+    # and the arena branch). None/empty means "plain, non-arena, non-routed turn".
+    service._routing_decision = None  # pylint: disable=protected-access
+    service._turn_metrics = TurnMetrics()  # pylint: disable=protected-access
+    service._arena_comparison = None  # pylint: disable=protected-access
     return service
 
 
