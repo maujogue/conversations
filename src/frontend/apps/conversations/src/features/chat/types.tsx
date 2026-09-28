@@ -2,6 +2,20 @@ import { UIMessage } from 'ai';
 
 export type ChatMessage = UIMessage;
 
+/** Router tier slugs (spec 5.3); `auto` lets the router decide. */
+export type TierSlug = 'auto' | 'simple' | 'standard' | 'complex';
+
+export const TIER_SLUGS: readonly TierSlug[] = [
+  'auto',
+  'simple',
+  'standard',
+  'complex',
+];
+
+export const isTierSlug = (value: unknown): value is TierSlug =>
+  typeof value === 'string' &&
+  (TIER_SLUGS as readonly string[]).includes(value);
+
 export interface ChatConversationProject {
   id: string;
   title: string;

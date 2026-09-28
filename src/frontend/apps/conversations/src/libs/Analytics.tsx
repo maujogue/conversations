@@ -21,7 +21,12 @@ type AnalyticEventUser = {
  *
  * Properties must stay free of user content (no titles, file names, prompts).
  */
-export type AnalyticFeatureEventName = 'carbon_footprint_opened';
+export type AnalyticFeatureEventName =
+  | 'carbon_footprint_opened'
+  // Router dashboard counters for the "Auto would have been enough" hint
+  // (spec 5.3): how often it is shown, and how often it is followed.
+  | 'router_auto_hint_shown'
+  | 'router_auto_hint_followed';
 
 export type AnalyticEventProperties = Record<
   string,

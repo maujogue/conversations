@@ -18,16 +18,29 @@ import pytest
 from core.factories import UserFactory
 from core.feature_flags.flags import FeatureFlags, FeatureToggle
 
-from chat import arena
+from chat import arena, arena_scores
 from chat.ai_sdk_types import FileUIPart, TextUIPart, UIMessage
-from chat.arena_results import _rate_block, answer_cost_eur, build_results, wilson_interval
+from chat.arena_results import (
+    _rate_block,
+    answer_cost_eur,
+    build_results,
+    promote_challenger,
+    wilson_interval,
+)
 from chat.clients.pydantic_ai import AIAgentService
 from chat.enums import (
     ArenaComparisonStatus,
     ArenaContextTag,
+    ArenaOrigin,
     ArenaRole,
     ArenaSide,
     ArenaVoteOutcome,
+    ReasoningEffort,
+    RoutingDomain,
+    RoutingReason,
+    RoutingTask,
+    RoutingTier,
+    TierSource,
 )
 from chat.factories import (
     ArenaChallengerFactory,
@@ -39,20 +52,25 @@ from chat.factories import (
 )
 from chat.llm_configuration import LLModel, LLMProvider
 from chat.model_health import model_health_cache_key
-from chat.models import ChatConversation
+from chat.models import ChatConversation, RoutingTierSettings
+from chat.router.labels import RoutingDecision, RoutingLabels
 
 pytestmark = pytest.mark.django_db
 
 
-def _make_llm(hrid: str, supports_image: bool = False, tools=None) -> LLModel:
+def _make_llm(hrid: str, supports_image: bool = False, tools=None, prices=None) -> LLModel:
+    input_price, output_price = prices or (None, None)
     return LLModel(
         hrid=hrid,
         model_name=f"{hrid}-llm",
         human_readable_name=hrid,
         is_active=True,
         supports_image=supports_image,
+        web_search="chat.tools.web_search_brave.web_search_brave",
         system_prompt="You are a helpful assistant.",
         tools=tools or [],
+        input_price_eur_per_mtok=input_price,
+        output_price_eur_per_mtok=output_price,
         provider=LLMProvider(
             hrid="albert", base_url="https://www.external-ai-service.com/", api_key="k"
         ),
@@ -82,9 +100,19 @@ def arena_settings(settings):
 
 
 @pytest.fixture
-def experiment():
-    """An active experiment with one challenger."""
-    experiment = ArenaExperimentFactory(is_active=True, champion_model_hrid="main-model")
+def tier_settings():
+    """Standard tier on ``main-model``, with the two challengers as its alternatives."""
+    settings_row = RoutingTierSettings.get_solo()
+    settings_row.standard_model_hrid = "main-model"
+    settings_row.standard_alternatives = ["challenger-model", "vision-challenger"]
+    settings_row.save()
+    return settings_row
+
+
+@pytest.fixture
+def experiment(tier_settings):
+    """An active standard-tier experiment with one challenger."""
+    experiment = ArenaExperimentFactory(is_active=True, tier=RoutingTier.STANDARD.value)
     ArenaChallengerFactory(experiment=experiment, model_hrid="challenger-model")
     return experiment
 
@@ -143,7 +171,7 @@ def test_draw_refused_when_flag_disabled(settings, experiment):
     )
 
 
-def test_draw_refused_without_active_experiment():
+def test_draw_refused_without_active_experiment(tier_settings):
     """An inactive experiment never draws."""
     inactive = ArenaExperimentFactory(is_active=False)
     ArenaChallengerFactory(experiment=inactive)
@@ -544,10 +572,7 @@ def test_answer_cost_eur():
 def test_build_results_scoreboard_and_position(experiment):
     """Win rate, interval, indicative flag, context slices and position check."""
     experiment.min_votes_for_conclusion = 3
-    experiment.champion_input_price_eur_per_mtok = 1
-    experiment.champion_output_price_eur_per_mtok = 1
     experiment.save()
-    experiment.challengers.update(input_price_eur_per_mtok=0.5, output_price_eur_per_mtok=0.5)
     common = {
         "experiment": experiment,
         "champion_model_hrid": "main-model",
@@ -610,7 +635,7 @@ def test_build_results_scoreboard_and_position(experiment):
 def test_experiment_validation_single_active_and_challenger_tools(experiment, settings):
     """Model-level validation: one active experiment, challengers share the champion tools."""
     # BaseModel validates on save, so building is enough to exercise clean().
-    other = ArenaExperimentFactory.build(is_active=True, champion_model_hrid="main-model")
+    other = ArenaExperimentFactory.build(is_active=True, tier=RoutingTier.STANDARD.value)
     with pytest.raises(ValidationError):
         other.full_clean()
 
@@ -742,7 +767,6 @@ def test_deletion_erases_content_and_user_links(delete_via):
 
     comparison = ArenaComparisonFactory(
         input_snapshot={"prompt": "private question"},
-        theme="private theme",
         champion_trace_id="private trace",
     )
     arena.record_side_result(comparison, ArenaRole.CHAMPION, payload=_payload("Private answer"))
@@ -760,7 +784,7 @@ def test_deletion_erases_content_and_user_links(delete_via):
     assert comparison.input_snapshot is None
     assert comparison.champion_payload is None
     assert comparison.challenger_payload is None
-    assert comparison.champion_trace_id == comparison.theme == ""
+    assert comparison.champion_trace_id == ""
     assert comparison.status == ArenaComparisonStatus.ERRORED
 
 
@@ -809,11 +833,12 @@ def test_vote_threshold_does_not_imply_sufficient_evidence():
     assert _rate_block(70, 100, 100)["evidence_sufficient"]
 
 
-def test_prices_are_frozen_at_candidate_claim(experiment):
-    """Editing either model's configured prices cannot change recorded call costs."""
-    experiment.champion_input_price_eur_per_mtok = 1
-    experiment.champion_output_price_eur_per_mtok = 2
-    experiment.save()
+def test_prices_are_frozen_at_candidate_claim(settings, experiment):
+    """Editing a model's configured prices cannot change recorded call costs."""
+    settings.LLM_CONFIGURATIONS = {
+        **settings.LLM_CONFIGURATIONS,
+        "main-model": _make_llm("main-model", prices=(1, 2)),
+    }
     conversation = ChatConversationFactory()
     comparison = arena.draw_comparison(
         conversation=conversation, user=conversation.owner, force_web_search=False
@@ -831,10 +856,12 @@ def test_prices_are_frozen_at_candidate_claim(experiment):
         completion_tokens=1000,
     )
     before = build_results(experiment)["header"]["total_cost_eur"]
-    experiment.champion_input_price_eur_per_mtok = 10
-    experiment.champion_output_price_eur_per_mtok = 20
-    experiment.save()
+    settings.LLM_CONFIGURATIONS = {
+        **settings.LLM_CONFIGURATIONS,
+        "main-model": _make_llm("main-model", prices=(10, 20)),
+    }
     assert before is not None
+    assert comparison.price_snapshot["champion"]["input"] == "1.0"
     assert build_results(experiment)["header"]["total_cost_eur"] == before
     assert comparison.price_snapshot["champion"]["captured_at"]
 
@@ -913,3 +940,454 @@ def test_older_normal_turn_cannot_roll_back_arena_version(experiment):
     conversation.refresh_from_db()
     assert conversation.arena_version == comparison.conversation_version
     assert conversation.messages == []
+
+
+# --------------------------------------------------------------------------- #
+# Per-tier draws, control challenger and routing labels (router spec 8.1)
+# --------------------------------------------------------------------------- #
+
+
+def _decision(tier=RoutingTier.STANDARD, model_hrid="main-model", **overrides):
+    """A routing decision as ``post_arena_draw`` hands it to the draw."""
+    values = {
+        "tier": tier,
+        "tier_source": TierSource.ROUTER,
+        "model_hrid": model_hrid,
+        "reason": RoutingReason.CLASSIFIED,
+        "labels": RoutingLabels(
+            complexity=tier,
+            domain=RoutingDomain.ADMINISTRATIVE,
+            task=RoutingTask.WRITING,
+            confidence=0.82,
+        ),
+        "router_confidence": 0.82,
+        "router_model_hrid": "router-model",
+        "router_prompt_version": "v3",
+    }
+    values.update(overrides)
+    return RoutingDecision(**values)
+
+
+def test_draw_stores_the_routing_labels_of_the_turn(experiment):
+    """A routed turn tags its comparison with tier, source, domain, task and router facts."""
+    conversation = ChatConversationFactory()
+
+    comparison = arena.draw_comparison(
+        conversation=conversation,
+        user=conversation.owner,
+        force_web_search=False,
+        routing_decision=_decision(),
+    )
+
+    assert comparison.tier == RoutingTier.STANDARD
+    assert comparison.tier_source == TierSource.ROUTER
+    assert comparison.domain == RoutingDomain.ADMINISTRATIVE
+    assert comparison.task == RoutingTask.WRITING
+    assert comparison.router_confidence == 0.82
+    assert comparison.router_reason == RoutingReason.CLASSIFIED
+    assert comparison.router_model_hrid == "router-model"
+    assert comparison.router_prompt_version == "v3"
+    assert comparison.origin == ArenaOrigin.DRAW
+
+
+def test_draw_only_on_the_experiment_tier(experiment):
+    """A turn routed to another tier is never compared by this experiment."""
+    conversation = ChatConversationFactory()
+
+    assert (
+        arena.draw_comparison(
+            conversation=conversation,
+            user=conversation.owner,
+            force_web_search=False,
+            routing_decision=_decision(tier=RoutingTier.COMPLEX),
+        )
+        is None
+    )
+
+
+def test_draw_refused_when_the_turn_left_the_tier_model(experiment):
+    """A health cascade or constraint walk moved the turn off the champion: no draw."""
+    conversation = ChatConversationFactory()
+
+    assert (
+        arena.draw_comparison(
+            conversation=conversation,
+            user=conversation.owner,
+            force_web_search=False,
+            routing_decision=_decision(model_hrid="vision-challenger"),
+        )
+        is None
+    )
+    assert arena.get_refused_draws(experiment.pk) == 1
+
+
+def test_draw_skips_a_challenger_that_cannot_serve_the_turn(settings, experiment):
+    """Turn constraints are the router's own: a challenger that fails one is not drawn."""
+    settings.LLM_CONFIGURATIONS["challenger-model"].web_search = None
+    conversation = ChatConversationFactory()
+
+    assert (
+        arena.draw_comparison(
+            conversation=conversation, user=conversation.owner, force_web_search=True
+        )
+        is None
+    )
+    # Without the forced search the same challenger is eligible again.
+    assert (
+        arena.draw_comparison(
+            conversation=conversation, user=conversation.owner, force_web_search=False
+        )
+        is not None
+    )
+
+
+def test_control_challenger_is_drawn_on_its_own_share(experiment):
+    """The control is drawn on ``CONTROL_DRAW_RATE`` of the draws, the regular one otherwise."""
+    ArenaChallengerFactory(experiment=experiment, model_hrid="vision-challenger", is_control=True)
+    conversation = ChatConversationFactory()
+
+    with patch("chat.arena.random.random", side_effect=[0.0, 0.0]):
+        drawn = arena.draw_comparison(
+            conversation=conversation, user=conversation.owner, force_web_search=False
+        )
+    assert drawn.challenger_model_hrid == "vision-challenger"
+
+    with patch("chat.arena.random.random", side_effect=[0.0, 0.5]):
+        drawn = arena.draw_comparison(
+            conversation=conversation, user=conversation.owner, force_web_search=False
+        )
+    assert drawn.challenger_model_hrid == "challenger-model"
+
+
+def test_challenger_must_belong_to_the_tier_unless_it_is_the_control(experiment, settings):
+    """Out-of-tier challengers are refused; the flagged control is the one exception."""
+    settings.LLM_CONFIGURATIONS["outsider"] = _make_llm("outsider")
+
+    outsider = ArenaChallengerFactory.build(experiment=experiment, model_hrid="outsider")
+    with pytest.raises(ValidationError):
+        outsider.full_clean()
+
+    control = ArenaChallengerFactory.build(
+        experiment=experiment, model_hrid="outsider", is_control=True
+    )
+    control.full_clean()
+
+
+def test_experiment_refuses_a_second_active_experiment_on_the_same_tier_only(experiment):
+    """One active experiment per tier: another tier may run its own at the same time."""
+    same_tier = ArenaExperimentFactory.build(is_active=True, tier=RoutingTier.STANDARD.value)
+    with pytest.raises(ValidationError):
+        same_tier.full_clean()
+
+    other_tier = ArenaExperimentFactory.build(is_active=True, tier=RoutingTier.COMPLEX.value)
+    other_tier.full_clean()
+
+
+def test_experiment_champion_follows_the_tier_settings(experiment, tier_settings):
+    """The champion is read from the tier settings, so a promotion moves it."""
+    assert experiment.champion_model_hrid == "main-model"
+
+    tier_settings.standard_model_hrid = "challenger-model"
+    tier_settings.save()
+
+    assert experiment.champion_model_hrid == "challenger-model"
+
+
+def test_record_side_result_stores_the_footprint_source_and_reasoning(experiment):
+    """Per-side CO2 source, reasoning tokens and effort land on the comparison."""
+    comparison = ArenaComparisonFactory(experiment=experiment)
+
+    arena.record_side_result(
+        comparison,
+        ArenaRole.CHALLENGER,
+        payload=_payload("B"),
+        co2_impact=0.2,
+        co2_source="estimated_reasoning",
+        reasoning_tokens=1200,
+        reasoning_effort="high",
+    )
+
+    comparison.refresh_from_db()
+    assert comparison.challenger_co2_source == "estimated_reasoning"
+    assert comparison.challenger_reasoning_tokens == 1200
+    assert comparison.challenger_reasoning_effort == "high"
+
+
+def test_experiment_effort_overrides_the_router_effort(experiment):
+    """A tier 3 experiment can pin both sides to one effort (router spec 8.1)."""
+    decision = _decision(reasoning_effort=ReasoningEffort.MEDIUM)
+    assert arena.effort_for_comparison(experiment, decision) == "medium"
+
+    experiment.reasoning_effort = ReasoningEffort.HIGH.value
+    assert arena.effort_for_comparison(experiment, decision) == "high"
+
+    conversation = ChatConversationFactory()
+    comparison = arena.draw_comparison(
+        conversation=conversation,
+        user=conversation.owner,
+        force_web_search=False,
+        routing_decision=decision,
+    )
+    assert comparison.input_snapshot["reasoning_effort"] == "medium"
+
+
+# --------------------------------------------------------------------------- #
+# Results: populations, tag tables and the promotion verdict
+# --------------------------------------------------------------------------- #
+
+
+def _voted_comparison(experiment, winner, **overrides):
+    """A decisive vote on ``experiment``, champion on the left by default."""
+    values = {
+        "experiment": experiment,
+        "challenger_model_hrid": "challenger-model",
+        "status": ArenaComparisonStatus.VOTED,
+        "winner": winner,
+        "champion_side": ArenaSide.LEFT,
+        "champion_co2_impact": 1e-4,
+        "challenger_co2_impact": 1e-4,
+        "champion_latency_ms": 1000,
+        "challenger_latency_ms": 1000,
+    }
+    values.update(overrides)
+    return ArenaComparisonFactory(**values)
+
+
+def test_results_keep_sampled_manual_and_control_votes_apart(experiment):
+    """Second opinions and the control challenger never enter the sampled win rate."""
+    experiment.min_votes_for_conclusion = 2
+    experiment.save()
+    ArenaChallengerFactory(experiment=experiment, model_hrid="vision-challenger", is_control=True)
+    _voted_comparison(experiment, ArenaRole.CHALLENGER)
+    _voted_comparison(experiment, ArenaRole.CHAMPION)
+    _voted_comparison(experiment, ArenaRole.CHALLENGER, origin=ArenaOrigin.MANUAL.value)
+    _voted_comparison(experiment, ArenaRole.CHALLENGER, challenger_model_hrid="vision-challenger")
+
+    results = build_results(experiment)
+
+    assert [row["model_hrid"] for row in results["challengers"]] == ["challenger-model"]
+    row = results["challengers"][0]
+    assert (row["votes"], row["wins"]) == (2, 1)
+    assert (row["manual"]["votes"], row["manual"]["wins"]) == (1, 1)
+    assert results["header"]["manual"]["votes"] == 1
+    assert [c["model_hrid"] for c in results["controls"]] == ["vision-challenger"]
+    assert results["controls"][0]["votes"] == 1
+    assert results["header"]["control_comparisons"] == 1
+    # The champion row is read against the sampled population only.
+    assert results["champion"]["votes"] == 2
+
+
+def test_results_tag_tables_by_domain_task_and_context(experiment):
+    """Three tag tables replace the single by-context slice (router spec 8.1)."""
+    experiment.min_votes_for_conclusion = 1
+    experiment.save()
+    _voted_comparison(
+        experiment,
+        ArenaRole.CHALLENGER,
+        domain=RoutingDomain.LEGAL.value,
+        task=RoutingTask.WRITING.value,
+        context_tags=["plain"],
+    )
+    _voted_comparison(
+        experiment,
+        ArenaRole.CHAMPION,
+        domain=RoutingDomain.LEGAL.value,
+        task=RoutingTask.CODING.value,
+        context_tags=["web_search", "attachment"],
+    )
+
+    results = build_results(experiment)
+
+    assert {(r["tag"], r["votes"], r["wins"]) for r in results["by_domain"]} == {("legal", 2, 1)}
+    assert {(r["tag"], r["votes"], r["wins"]) for r in results["by_task"]} == {
+        ("writing", 1, 1),
+        ("coding", 1, 0),
+    }
+    assert {(r["tag"], r["votes"], r["wins"]) for r in results["by_context_tags"]} == {
+        ("plain", 1, 1),
+        ("web_search", 1, 0),
+        ("attachment", 1, 0),
+    }
+    assert results["by_context"] == results["by_context_tags"]
+
+
+@pytest.mark.parametrize(
+    ("wins", "losses", "challenger_co2", "challenger_latency", "verdict"),
+    [
+        # A clear preference: the interval sits entirely above 50%.
+        (10, 0, 1e-4, 1000, "promote"),
+        # A coin flip on votes, but a much lighter and no slower answer.
+        (5, 5, 5e-5, 900, "promote_for_footprint"),
+        # A coin flip with the same footprint: nothing justifies moving production.
+        (5, 5, 1e-4, 1000, "keep"),
+        # Lighter, but slower at p95: the footprint alone does not promote.
+        (5, 5, 5e-5, 3000, "keep"),
+        # Under the vote threshold: nothing to conclude yet.
+        (1, 1, 5e-5, 900, "indicative"),
+    ],
+)
+def test_promotion_verdicts(  # noqa: PLR0913
+    experiment, wins, losses, challenger_co2, challenger_latency, verdict
+):
+    """The verdict column implements the rule of router spec 8.1."""
+    experiment.min_votes_for_conclusion = 10
+    experiment.save()
+    footprint = {
+        "challenger_co2_impact": challenger_co2,
+        "challenger_latency_ms": challenger_latency,
+    }
+    for _ in range(wins):
+        _voted_comparison(experiment, ArenaRole.CHALLENGER, **footprint)
+    for _ in range(losses):
+        _voted_comparison(experiment, ArenaRole.CHAMPION, **footprint)
+
+    row = build_results(experiment)["challengers"][0]
+
+    assert row["verdict"] == verdict
+
+
+def test_promotion_writes_the_tier_settings_and_its_history(experiment, tier_settings):
+    """Promoting a challenger moves the tier model and logs the evidence."""
+    experiment.min_votes_for_conclusion = 2
+    experiment.save()
+    user = UserFactory()
+    for _ in range(10):
+        _voted_comparison(experiment, ArenaRole.CHALLENGER)
+
+    history = promote_challenger(experiment, "challenger-model", user=user)
+
+    tier_settings.refresh_from_db()
+    assert tier_settings.standard_model_hrid == "challenger-model"
+    # The former champion stays available as an alternative of the tier.
+    assert "main-model" in tier_settings.standard_alternatives
+    assert tier_settings.alternatives_for(RoutingTier.STANDARD) == [
+        "vision-challenger",
+        "main-model",
+    ]
+    assert history.tier == RoutingTier.STANDARD
+    assert history.reason == "promotion"
+    assert (history.from_value, history.to_value) == ("main-model", "challenger-model")
+    assert history.changed_by == user
+    assert history.evidence["votes"] == 10
+    assert history.evidence["win_rate"] == 1.0
+    assert history.evidence["verdict"] == "promote"
+    assert history.evidence["experiment_id"] == str(experiment.pk)
+    assert "wh_ratio" in history.evidence
+
+
+def test_promotion_refuses_an_unknown_challenger(experiment):
+    """Only a model of the scoreboard can be promoted."""
+    with pytest.raises(ValueError, match="not a challenger"):
+        promote_challenger(experiment, "vision-challenger")
+
+
+# --------------------------------------------------------------------------- #
+# Langfuse scores (router spec 12)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def langfuse_scores(settings):
+    """Langfuse enabled with a patched client; yields the recorded ``create_score`` calls."""
+    settings.LANGFUSE_ENABLED = True
+    with patch("chat.arena_scores.langfuse.get_client") as get_client:
+        yield get_client.return_value.create_score
+
+
+def _finished_comparison(**kwargs):
+    comparison = ArenaComparisonFactory(**kwargs)
+    arena.record_side_result(
+        comparison, ArenaRole.CHAMPION, payload=_payload("A"), trace_id="trace-champion"
+    )
+    arena.record_side_result(
+        comparison, ArenaRole.CHALLENGER, payload=_payload("B"), trace_id="trace-challenger"
+    )
+    return comparison
+
+
+def test_vote_pushes_a_categorical_score_on_both_traces(langfuse_scores):
+    """The winner's trace gets ``won``, the loser's ``lost``, both idempotent by score id."""
+    comparison = _finished_comparison(champion_side="left")
+
+    arena.vote(comparison, "right")
+
+    calls = {call.kwargs["trace_id"]: call.kwargs for call in langfuse_scores.call_args_list}
+    assert set(calls) == {"trace-champion", "trace-challenger"}
+    champion = calls["trace-champion"]
+    assert champion["name"] == "arena_preference"
+    assert champion["value"] == "lost"
+    assert champion["data_type"] == "CATEGORICAL"
+    assert champion["score_id"] == f"{comparison.pk}-champion"
+    assert f"comparison={comparison.pk}" in champion["comment"]
+    assert "origin=draw" in champion["comment"]
+    assert calls["trace-challenger"]["value"] == "won"
+    assert calls["trace-challenger"]["score_id"] == f"{comparison.pk}-challenger"
+
+
+@pytest.mark.parametrize(
+    "outcome,expected",
+    [(ArenaVoteOutcome.TIE, "tie"), (ArenaVoteOutcome.BOTH_BAD, "both_bad")],
+)
+def test_draw_pushes_the_same_value_on_both_traces(langfuse_scores, outcome, expected):
+    comparison = _finished_comparison(champion_side="left")
+
+    arena.vote(comparison, outcome.value)
+
+    assert {call.kwargs["value"] for call in langfuse_scores.call_args_list} == {expected}
+
+
+def test_abandonment_pushes_abandoned(langfuse_scores):
+    comparison = _finished_comparison(champion_side="left")
+
+    arena.vote(comparison, None)
+
+    assert {call.kwargs["value"] for call in langfuse_scores.call_args_list} == {"abandoned"}
+
+
+def test_resolve_pending_pushes_abandoned(langfuse_scores):
+    comparison = _finished_comparison(champion_side="left")
+
+    arena.resolve_pending(comparison.conversation)
+
+    assert {call.kwargs["value"] for call in langfuse_scores.call_args_list} == {"abandoned"}
+
+
+def test_an_errored_side_is_scored_abandoned_and_a_missing_trace_is_skipped(langfuse_scores):
+    """No trace id, no score: the side never reached Langfuse."""
+    comparison = ArenaComparisonFactory(champion_side="left")
+    arena.record_side_result(
+        comparison, ArenaRole.CHAMPION, payload=_payload("A"), trace_id="trace-champion"
+    )
+    arena.record_side_result(comparison, ArenaRole.CHALLENGER, error="model_connection_error")
+
+    arena.vote(comparison, "right")
+
+    assert [call.kwargs["trace_id"] for call in langfuse_scores.call_args_list] == [
+        "trace-champion"
+    ]
+    assert langfuse_scores.call_args_list[0].kwargs["value"] == "abandoned"
+
+
+def test_no_score_when_langfuse_is_disabled(settings):
+    settings.LANGFUSE_ENABLED = False
+    comparison = _finished_comparison(champion_side="left")
+
+    with patch("chat.arena_scores.langfuse.get_client") as get_client:
+        arena.vote(comparison, "left")
+
+    get_client.assert_not_called()
+
+
+def test_a_langfuse_failure_never_breaks_a_vote(langfuse_scores):
+    langfuse_scores.side_effect = RuntimeError("langfuse down")
+    comparison = _finished_comparison(champion_side="left")
+
+    voted = arena.vote(comparison, "left")
+
+    assert voted.status == ArenaComparisonStatus.VOTED
+    assert voted.winner == ArenaRole.CHAMPION
+
+
+def test_a_pending_comparison_has_no_score_value():
+    comparison = ArenaComparisonFactory()
+    assert arena_scores.score_value_for(comparison, ArenaRole.CHAMPION) is None

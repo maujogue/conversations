@@ -3,6 +3,7 @@
 # pylint: disable=redefined-outer-name, unused-argument
 
 import json
+from unittest.mock import patch
 
 from django.core.cache import cache
 from django.utils import timezone
@@ -18,7 +19,16 @@ from core.factories import UserFactory
 from core.feature_flags.flags import FeatureFlags, FeatureToggle
 
 from chat import arena
-from chat.enums import ArenaComparisonStatus, ArenaRole
+from chat.ai_sdk_types import TextUIPart, UIMessage
+from chat.enums import (
+    ArenaComparisonStatus,
+    ArenaRole,
+    RoutingDomain,
+    RoutingReason,
+    RoutingTask,
+    RoutingTier,
+    TierSource,
+)
 from chat.factories import (
     ArenaChallengerFactory,
     ArenaComparisonFactory,
@@ -26,7 +36,9 @@ from chat.factories import (
     ChatConversationFactory,
 )
 from chat.llm_configuration import LLModel, LLMProvider
-from chat.models import ArenaComparison
+from chat.models import ArenaComparison, ArenaExperiment, RoutingTierSettings
+from chat.router.labels import RoutingDecision, RoutingLabels
+from chat.views.conversations import ChatViewSet
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -39,6 +51,7 @@ def _make_llm(hrid: str) -> LLModel:
         model_name=f"{hrid}-llm",
         human_readable_name=hrid,
         is_active=True,
+        web_search="chat.tools.web_search_brave.web_search_brave",
         system_prompt="You are a helpful assistant.",
         tools=[],
         provider=LLMProvider(
@@ -66,11 +79,19 @@ def arena_settings(settings):
 
 
 @pytest.fixture
-def experiment():
-    """An active experiment drawing on every turn."""
-    experiment = ArenaExperimentFactory(
-        is_active=True, champion_model_hrid="main-model", sampling_rate=1.0
-    )
+def tier_settings():
+    """Standard tier on ``main-model`` with ``challenger-model`` as its alternative."""
+    settings_row = RoutingTierSettings.get_solo()
+    settings_row.standard_model_hrid = "main-model"
+    settings_row.standard_alternatives = ["challenger-model"]
+    settings_row.save()
+    return settings_row
+
+
+@pytest.fixture
+def experiment(tier_settings):
+    """An active standard-tier experiment drawing on every turn."""
+    experiment = ArenaExperimentFactory(is_active=True, sampling_rate=1.0)
     ArenaChallengerFactory(experiment=experiment, model_hrid="challenger-model")
     return experiment
 
@@ -168,6 +189,14 @@ def test_candidate_streams_and_vote_for_challenger(
     body = vote.json()
     assert [m["role"] for m in body["messages"]] == ["user", "assistant"]
     assert body["pending_arena_comparison"] is None
+    assert body["acknowledgement"] == {
+        "user_votes": 1,
+        "experiment_votes": 1,
+        "tier_label": None,
+        "task_label": None,
+        "domain_label": None,
+        "milestone": "first_vote",
+    }
     assert "main-model" not in str(body) and "challenger-model" not in str(body)
     comparison.refresh_from_db()
     assert comparison.status == ArenaComparisonStatus.VOTED
@@ -287,7 +316,9 @@ def test_vote_null_abandons_and_returns_conversation(api_client, experiment):
     )
 
     assert response.status_code == status.HTTP_200_OK
-    assert response.json()["messages"][-1]["content"] == "Champion answer"
+    body = response.json()
+    assert body["messages"][-1]["content"] == "Champion answer"
+    assert body["acknowledgement"] is None
     comparison.refresh_from_db()
     assert comparison.status == ArenaComparisonStatus.ABANDONED
 
@@ -332,7 +363,11 @@ def test_vote_tie_keeps_champion_and_records_the_vote(api_client, experiment):
     )
 
     assert response.status_code == status.HTTP_200_OK
-    assert response.json()["messages"][-1]["content"] == "Champion answer"
+    body = response.json()
+    assert body["messages"][-1]["content"] == "Champion answer"
+    assert body["acknowledgement"]["user_votes"] == 1
+    assert body["acknowledgement"]["experiment_votes"] == 1
+    assert body["acknowledgement"]["milestone"] == "first_vote"
     comparison.refresh_from_db()
     assert comparison.status == ArenaComparisonStatus.VOTED
     assert comparison.winner == "tie"
@@ -638,3 +673,411 @@ def test_self_documentation_tool_is_blind_in_live_stream_and_saved_payload(
         payload = comparison.payload_for_side(side)
         assert payload is not None
         assert "provider_hrid" not in json.dumps(payload)
+
+
+# --------------------------------------------------------------------------- #
+# Second opinion on demand (router spec 8.2)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def manual_settings(settings, tier_settings):
+    """Second opinions enabled, with two alternatives on the standard tier."""
+    settings.LLM_CONFIGURATIONS["second-challenger"] = _make_llm("second-challenger")
+    tier_settings.standard_alternatives = ["challenger-model", "second-challenger"]
+    tier_settings.save()
+    settings.FEATURE_FLAGS = FeatureFlags(
+        arena=FeatureToggle.ENABLED, arena_manual=FeatureToggle.ENABLED
+    )
+    return tier_settings
+
+
+def _answered_conversation():
+    """A conversation whose last turn was answered by the standard tier model."""
+    return ChatConversationFactory(
+        owner__language="en-us",
+        model_hrid="main-model",
+        messages=[
+            UIMessage(
+                id="u1", role="user", content="Hi", parts=[TextUIPart(type="text", text="Hi")]
+            ),
+            UIMessage(
+                id="a1",
+                role="assistant",
+                content="First answer",
+                parts=[TextUIPart(type="text", text="First answer")],
+            ),
+        ],
+        pydantic_messages=[
+            {"kind": "request", "parts": [{"part_kind": "user-prompt", "content": "Hi"}]},
+            {"kind": "response", "parts": [{"part_kind": "text", "content": "First answer"}]},
+        ],
+        last_routing={"tier": "standard", "labels": {"domain": "legal", "task": "writing"}},
+    )
+
+
+def test_manual_comparison_copies_the_committed_answer(api_client, experiment, manual_settings):
+    """The endpoint returns the comparison and the single side left to stream."""
+    conversation = _answered_conversation()
+    api_client.force_login(conversation.owner)
+
+    response = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/arena/manual/", {"message_id": "a1"}, format="json"
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    body = response.json()
+    assert set(body) == {"comparison_id", "side"}
+    comparison = ArenaComparison.objects.get(pk=body["comparison_id"])
+    assert body["side"] == comparison.challenger_side
+    assert comparison.origin == "manual"
+    assert comparison.tier == "standard"
+    assert (comparison.domain, comparison.task) == ("legal", "writing")
+    assert comparison.champion_model_hrid == "main-model"
+    assert comparison.challenger_model_hrid in {"challenger-model", "second-challenger"}
+    # The champion side is already done: its answer is the one in the conversation.
+    assert comparison.champion_committed is True
+    assert comparison.side_succeeded(ArenaRole.CHAMPION)
+    assert comparison.champion_payload["output_ui_message"]["content"] == "First answer"
+    # The challenger replays the same question on the history before the answer.
+    assert comparison.input_snapshot["request_ui_message"]["content"] == "Hi"
+    assert comparison.input_snapshot["messages"] == []
+    assert comparison.input_snapshot["pydantic_messages"] == []
+    assert "main-model" not in str(body)
+
+
+def test_manual_comparison_works_without_an_active_experiment(
+    api_client, manual_settings, tier_settings
+):
+    """A second opinion is a user action: it must not need an admin experiment."""
+    conversation = _answered_conversation()
+    api_client.force_login(conversation.owner)
+
+    response = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/arena/manual/", {"message_id": "a1"}, format="json"
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    comparison = ArenaComparison.objects.get(pk=response.json()["comparison_id"])
+    assert comparison.origin == "manual"
+    assert comparison.tier == "standard"
+    # Filed under the per-tier container, which never draws on its own.
+    assert comparison.experiment.name == "Second opinion (standard)"
+    assert comparison.experiment.is_active is False
+    assert comparison.experiment.sampling_rate == 0
+
+    # A second request reuses the same container instead of piling rows up.
+    api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/arena/manual/", {"message_id": "a1"}, format="json"
+    )
+    assert ArenaExperiment.objects.filter(name="Second opinion (standard)").count() == 1
+
+
+def test_manual_comparison_needs_the_feature_flag(api_client, settings, experiment, tier_settings):
+    """Without ``arena_manual`` the endpoint is closed."""
+    settings.FEATURE_FLAGS = FeatureFlags(arena=FeatureToggle.ENABLED)
+    conversation = _answered_conversation()
+    api_client.force_login(conversation.owner)
+
+    response = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/arena/manual/", {"message_id": "a1"}, format="json"
+    )
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    assert not ArenaComparison.objects.exists()
+
+
+def test_manual_comparison_only_on_the_last_answer(api_client, experiment, manual_settings):
+    """An older message cannot be compared: the button lives on the last answer."""
+    conversation = _answered_conversation()
+    api_client.force_login(conversation.owner)
+
+    response = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/arena/manual/", {"message_id": "u1"}, format="json"
+    )
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    assert response.json() == {"error": "arena_manual_not_last_message"}
+
+
+def test_manual_comparison_is_repeatable_until_alternatives_run_out(
+    api_client, experiment, manual_settings
+):
+    """Each call draws an untried alternative; when none is left the endpoint says so."""
+    conversation = _answered_conversation()
+    api_client.force_login(conversation.owner)
+    url = f"/api/v1.0/chats/{conversation.pk}/arena/manual/"
+
+    tried = set()
+    for _ in range(2):
+        body = api_client.post(url, {"message_id": "a1"}, format="json").json()
+        comparison = ArenaComparison.objects.get(pk=body["comparison_id"])
+        tried.add(comparison.challenger_model_hrid)
+        # No daily cap: a second opinion is always allowed while models remain.
+        arena.vote(comparison, None)
+
+    assert tried == {"challenger-model", "second-challenger"}
+    exhausted = api_client.post(url, {"message_id": "a1"}, format="json")
+    assert exhausted.status_code == status.HTTP_409_CONFLICT
+    assert exhausted.json() == {"error": "arena_manual_exhausted"}
+
+
+@freeze_time(FROZEN)
+@respx.mock
+def test_manual_challenger_stream_and_vote_swaps_the_answer(
+    api_client, experiment, manual_settings, mock_openai_stream_multi_calls, hello_conversation_data
+):
+    """Only the challenger streams; voting for it replaces the committed answer."""
+    conversation = _answered_conversation()
+    api_client.force_login(conversation.owner)
+    body = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/arena/manual/", {"message_id": "a1"}, format="json"
+    ).json()
+    comparison = ArenaComparison.objects.get(pk=body["comparison_id"])
+
+    response = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/conversation/"
+        f"?arena_comparison={comparison.pk}&arena_side={body['side']}",
+        hello_conversation_data,
+        format="json",
+    )
+    assert response.status_code == status.HTTP_200_OK
+    _drain(response)
+
+    comparison.refresh_from_db()
+    assert comparison.side_succeeded(ArenaRole.CHALLENGER)
+    assert comparison.is_restorable()
+
+    vote = api_client.post(
+        f"/api/v1.0/chats/{conversation.pk}/arena/{comparison.pk}/vote/",
+        {"side": comparison.challenger_side},
+        format="json",
+    )
+
+    assert vote.status_code == status.HTTP_200_OK
+    comparison.refresh_from_db()
+    assert comparison.status == ArenaComparisonStatus.VOTED
+    assert comparison.winner == ArenaRole.CHALLENGER
+    conversation.refresh_from_db()
+    assert [m.role for m in conversation.messages] == ["user", "assistant"]
+    assert conversation.messages[-1].content == "Hello there"
+    # The old turn was swapped, not stacked on top of the previous answer.
+    assert len(conversation.pydantic_messages) == 2
+
+
+@pytest.mark.parametrize(("tier", "expected_arena"), [("standard", True), ("complex", False)])
+def test_draw_routes_the_turn_and_matches_the_experiment_tier(
+    api_client, settings, experiment, tier, expected_arena
+):
+    """With the router on, the draw classifies the turn and only draws on its own tier."""
+    settings.FEATURE_FLAGS = FeatureFlags(arena=FeatureToggle.ENABLED, router=FeatureToggle.ENABLED)
+    conversation = ChatConversationFactory()
+    api_client.force_login(conversation.owner)
+    decision = RoutingDecision(
+        tier=RoutingTier(tier),
+        tier_source=TierSource.ROUTER,
+        model_hrid="main-model",
+        reason=RoutingReason.CLASSIFIED,
+        labels=RoutingLabels(
+            complexity=RoutingTier(tier),
+            domain=RoutingDomain.HR,
+            task=RoutingTask.SUMMARIZATION,
+            confidence=0.9,
+        ),
+        router_confidence=0.9,
+    )
+
+    with patch.object(ChatViewSet, "_route_turn", return_value=decision):
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": {"id": "u1", "role": "user", "parts": [{"type": "text", "text": "Hi"}]}},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["arena"] is expected_arena
+    if expected_arena:
+        comparison = ArenaComparison.objects.get()
+        assert (comparison.tier, comparison.domain, comparison.task) == (
+            "standard",
+            "hr",
+            "summarization",
+        )
+
+
+# --- the pinned tier on an arena turn -------------------------------------------------
+
+
+@pytest.fixture
+def every_tier_configured(tier_settings):
+    """A model on every tier: without one a tier falls through to the constraint
+    fallback, which would mask the tier these tests are about."""
+    tier_settings.simple_model_hrid = "main-model"
+    tier_settings.complex_model_hrid = "challenger-model"
+    tier_settings.save()
+    return tier_settings
+
+
+@pytest.fixture
+def router_on(settings, every_tier_configured):
+    """Arena and router both on: the draw routes the turn itself."""
+    settings.FEATURE_FLAGS = FeatureFlags(arena=FeatureToggle.ENABLED, router=FeatureToggle.ENABLED)
+    return every_tier_configured
+
+
+@pytest.fixture
+def router_off(settings, every_tier_configured):
+    """Arena on, automatic routing off: only a hand-pinned tier decides the turn."""
+    settings.FEATURE_FLAGS = FeatureFlags(
+        arena=FeatureToggle.ENABLED, router=FeatureToggle.DISABLED
+    )
+    return every_tier_configured
+
+
+def _classify_returning(labels):
+    async def fake_classify(*_args, **_kwargs):
+        return labels, RoutingReason.CLASSIFIED.value, 42, "7"
+
+    return patch("chat.router.routing.classify", side_effect=fake_classify)
+
+
+ROUTER_WOULD_PICK_SIMPLE = RoutingLabels(
+    complexity=RoutingTier.SIMPLE,
+    domain=RoutingDomain.HR,
+    task=RoutingTask.SUMMARIZATION,
+    confidence=0.95,
+)
+
+DRAW_MESSAGE = {"id": "u1", "role": "user", "parts": [{"type": "text", "text": "Hi"}]}
+
+
+def test_draw_applies_the_tier_the_user_pinned(api_client, experiment, router_on):
+    """The composer's tier travels with the draw and routes the comparison.
+
+    An arena turn is routed here and its two streaming requests never carry the
+    preference (the backend picks a model per side), so a tier pinned on such a
+    turn would otherwise be ignored: the comparison would be drawn for the tier
+    the classifier picked, and the pin never recorded on the conversation.
+    """
+    conversation = ChatConversationFactory()
+    api_client.force_login(conversation.owner)
+    captured = {}
+
+    def capture(*, routing_decision, **_kwargs):
+        # Returning None is "no comparison drawn": these tests are about the
+        # decision handed to the draw, not about the comparison it builds.
+        captured["decision"] = routing_decision
+
+    with (
+        _classify_returning(ROUTER_WOULD_PICK_SIMPLE),
+        patch.object(arena, "draw_comparison", side_effect=capture),
+    ):
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": DRAW_MESSAGE, "tier": "complex"},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    conversation.refresh_from_db()
+    assert conversation.pinned_tier == "complex"
+    decision = captured["decision"]
+    assert (decision.tier, decision.tier_source) == (RoutingTier.COMPLEX, TierSource.USER)
+    assert decision.router_would_pick == RoutingTier.SIMPLE
+
+
+def test_draw_with_auto_releases_the_pin(api_client, experiment, router_on):
+    """`auto` hands the decision back to the router, as on the streaming endpoint."""
+    conversation = ChatConversationFactory(pinned_tier=RoutingTier.COMPLEX)
+    api_client.force_login(conversation.owner)
+    captured = {}
+
+    def capture(*, routing_decision, **_kwargs):
+        # Returning None is "no comparison drawn": these tests are about the
+        # decision handed to the draw, not about the comparison it builds.
+        captured["decision"] = routing_decision
+
+    with (
+        _classify_returning(ROUTER_WOULD_PICK_SIMPLE),
+        patch.object(arena, "draw_comparison", side_effect=capture),
+    ):
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": DRAW_MESSAGE, "tier": "auto"},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    conversation.refresh_from_db()
+    assert conversation.pinned_tier is None
+    assert captured["decision"].tier_source == TierSource.ROUTER
+
+
+def test_draw_without_tier_leaves_the_pin_alone(api_client, experiment, router_on):
+    """A client that sends no tier (pre-router shape) must not release a pin."""
+    conversation = ChatConversationFactory(pinned_tier=RoutingTier.COMPLEX)
+    api_client.force_login(conversation.owner)
+
+    with (
+        _classify_returning(ROUTER_WOULD_PICK_SIMPLE),
+        patch.object(arena, "draw_comparison", side_effect=lambda **_kwargs: None),
+    ):
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": DRAW_MESSAGE},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    conversation.refresh_from_db()
+    assert conversation.pinned_tier == RoutingTier.COMPLEX
+
+
+def test_draw_is_tier_specific_when_the_tier_is_pinned_and_the_router_off(
+    api_client, experiment, router_off
+):
+    """A pinned tier picks the experiment even where automatic routing is off.
+
+    The selector is offered to everyone, so the comparison has to belong to the
+    mode the user chose: the standard-tier experiment here, rather than "the one
+    active experiment" an unrouted turn would otherwise fall back to.
+    """
+    conversation = ChatConversationFactory()
+    api_client.force_login(conversation.owner)
+
+    with patch("chat.router.routing.classify") as classify:
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": DRAW_MESSAGE, "tier": "standard"},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["arena"] is True
+    classify.assert_not_called()
+    comparison = ArenaComparison.objects.get()
+    assert comparison.experiment == experiment
+    assert comparison.tier == "standard"
+    assert comparison.tier_source == TierSource.USER.value
+    assert comparison.champion_model_hrid == "main-model"
+
+
+def test_draw_skips_a_tier_with_no_experiment_instead_of_comparing_on_another(
+    api_client, experiment, router_off
+):
+    """Only the pinned tier's experiment may draw: no experiment, no comparison."""
+    conversation = ChatConversationFactory()
+    api_client.force_login(conversation.owner)
+
+    with patch("chat.router.routing.classify") as classify:
+        response = api_client.post(
+            f"/api/v1.0/chats/{conversation.pk}/arena/draw/",
+            {"message": DRAW_MESSAGE, "tier": "complex"},
+            format="json",
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    # The only active experiment is the standard-tier one: a complex turn is normal.
+    assert response.json() == {"arena": False}
+    classify.assert_not_called()
+    assert not ArenaComparison.objects.exists()

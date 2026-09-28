@@ -8,7 +8,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from chat.clients.pydantic_ai import AIAgentService
-from chat.clients.schema import ImagePostRunActions, StreamingState
+from chat.clients.schema import ImagePostRunActions, StreamingState, TurnMetrics
 from chat.llm_configuration import LLModel
 from chat.vercel_ai_sdk.core import events_v4
 
@@ -42,6 +42,9 @@ def service_fixture(conversation):
     """
     s = object.__new__(AIAgentService)
     s.conversation = conversation
+    s._arena_comparison = None
+    s._routing_decision = None
+    s._turn_metrics = TurnMetrics()
     s.user = SimpleNamespace(pk=1)
     s.conversation_agent = SimpleNamespace(
         configuration=LLModel(
@@ -152,6 +155,7 @@ async def test_finalize_emits_finish_message_with_co2(service, co2_impact):
     with (
         patch.object(service, "_agent_stop_streaming", new=AsyncMock()),
         patch.object(service, "_prepare_update_conversation"),
+        patch.object(service, "_save_completed_conversation", return_value=True),
         patch("chat.clients.pydantic_ai.sync_to_async", side_effect=_fake_sync_to_async),
         patch("chat.clients.pydantic_ai.record_and_compute_cooldown", return_value=0),
     ):

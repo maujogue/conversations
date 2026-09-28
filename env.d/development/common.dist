@@ -61,6 +61,15 @@ OIDC_AUTH_REQUEST_EXTRA_PARAMS={"acr_values": "eidas1"}
 AI_API_KEY=password
 # AI_MODEL=llama
 
+## --- Langfuse tracing (optional) -------------------------------------------
+# Point the app at any Langfuse instance (cloud, or a self-hosted one; see
+# docs/langfuse.md). From inside Docker, a Langfuse running on your machine is
+# reachable as http://host.docker.internal:<port>.
+# LANGFUSE_ENABLED=true
+# LANGFUSE_HOST=http://host.docker.internal:3001
+# LANGFUSE_PUBLIC_KEY=pk-lf-...
+# LANGFUSE_SECRET_KEY=sk-lf-...
+
 ## --- Addition Docs Resource Server Config
 # Docs integration — "Edit in Docs" export feature
 # DOCS_BASE_URL=http://docs

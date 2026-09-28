@@ -1,0 +1,66 @@
+[
+  {
+    "modelName": "mistral-medium-3-5",
+    "matchPattern": "(?i)^mistral[-/]?medium(-3[.-]?5)?(-latest)?$",
+    "unit": "TOKENS",
+    "inputPrice": 0.0000015,
+    "outputPrice": 0.0000075,
+    "source": "https://mistral.ai/pricing/api - Mistral Medium 3.5, standard tier, USD/token"
+  },
+  {
+    "modelName": "mistral-small",
+    "matchPattern": "(?i)^mistral[-/]?small(-latest)?$",
+    "unit": "TOKENS",
+    "inputPrice": 0.00000015,
+    "outputPrice": 0.0000006,
+    "source": "https://mistral.ai/pricing/api - Mistral Small, standard tier, USD/token"
+  },
+  {
+    "modelName": "mistral-small-3-2-24b-instruct-2506",
+    "matchPattern": "(?i)^(mistralai/)?mistral[-/]?small[-/]?3[.-]?2(-24b)?(-instruct)?(-2506)?(-latest)?$",
+    "unit": "TOKENS",
+    "inputPrice": 0.000000075,
+    "outputPrice": 0.0000002,
+    "source": "https://openrouter.ai/mistralai/mistral-small-3.2-24b-instruct - USD/token"
+  },
+  {
+    "modelName": "gpt-oss-120b",
+    "matchPattern": "(?i)^(openai/)?gpt-oss-120b$",
+    "unit": "TOKENS",
+    "inputPrice": 0.00000003,
+    "outputPrice": 0.00000017,
+    "source": "https://openrouter.ai/openai/gpt-oss-120b - USD/token"
+  },
+  {
+    "modelName": "ministral-3-8b-instruct-2512",
+    "matchPattern": "(?i)^(mistralai/)?ministral[-/]?3?[-/]?8b(-instruct)?(-2512)?(-latest)?$",
+    "unit": "TOKENS",
+    "inputPrice": 0.00000011,
+    "outputPrice": 0.00000011,
+    "source": "https://openrouter.ai/mistral/ministral-8b - USD/token"
+  },
+  {
+    "modelName": "gemma-4-31b-it",
+    "matchPattern": "(?i)^(google/)?gemma-4-31b(-it)?$",
+    "unit": "TOKENS",
+    "inputPrice": 0.00000009,
+    "outputPrice": 0.00000034,
+    "source": "https://openrouter.ai/google/gemma-4-31b-it - USD/token"
+  },
+  {
+    "modelName": "deepseek-v4-flash-0731",
+    "matchPattern": "(?i)^(deepseek/)?deepseek-v4-flash(-0731)?(-0423)?(-latest)?$",
+    "unit": "TOKENS",
+    "inputPrice": 0.00000005,
+    "outputPrice": 0.00000014,
+    "source": "https://openrouter.ai/deepseek/deepseek-v4-flash - standard (0423) tier, USD/token; approximation, the -0731 build isn't listed separately"
+  },
+  {
+    "modelName": "qwen3-coder-30b-a3b-instruct",
+    "matchPattern": "(?i)^(qwen/)?qwen3-coder-30b(-a3b)?(-instruct)?$",
+    "unit": "TOKENS",
+    "inputPrice": 0.00000007,
+    "outputPrice": 0.00000027,
+    "source": "https://openrouter.ai/qwen/qwen3-coder-30b-a3b-instruct - USD/token"
+  }
+]

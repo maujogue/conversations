@@ -67,6 +67,7 @@ dependencies = [
     "pypdf==6.16.1",
     "odfdo==3.22.8",
     "django-solo==2.5.1",
+    "ecologits==0.11.1",
     "tiktoken==0.13.0",
 ]
 

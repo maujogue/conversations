@@ -1,5 +1,6 @@
 """Django configuration mixin for Celery broker, result backend and task limits."""
 
+from celery.schedules import crontab
 from configurations import values
 
 
@@ -68,3 +69,15 @@ class CelerySettings:
         environ_name="DOCUMENT_PARSE_RESULT_TIMEOUT_SECONDS",
         environ_prefix=None,
     )
+
+    # Periodic tasks (celery beat). Heavy, infrequent maintenance runs as Kubernetes
+    # CronJobs (see src/helm); this schedule is for cheap in-process refreshes.
+    # `refresh_tier_energy` recomputes the Wh per answer of each routing tier over
+    # the last 30 days (router spec section 10): weekly is enough for a figure the
+    # selector only uses as an order of magnitude, and the window is rolling anyway.
+    CELERY_BEAT_SCHEDULE = {
+        "refresh-tier-energy": {
+            "task": "chat.tasks.refresh_tier_energy_task",
+            "schedule": crontab(minute=0, hour=3, day_of_week="monday"),
+        },
+    }

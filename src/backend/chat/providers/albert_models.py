@@ -1,8 +1,11 @@
 """Custom pydantic-ai model subclasses for Albert API providers."""
 
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Iterable
 
 from openai.types import chat
+from openai.types.chat import chat_completion_chunk
+from pydantic_ai.messages import ModelResponseStreamEvent
 from pydantic_ai.models.openai import (
     ChatCompletionChunk,
     OpenAIChatModel,
@@ -10,6 +13,10 @@ from pydantic_ai.models.openai import (
     _ChatCompletion,
 )
 from pydantic_ai.providers.openai import OpenAIProvider
+
+# Streamed reasoning fields on OpenAI-compatible chunks: `reasoning` (gpt-oss on
+# Albert, OpenRouter, Ollama) and `reasoning_content` (DeepSeek, Moonshot).
+REASONING_DELTA_FIELDS = ("reasoning", "reasoning_content")
 
 
 def _extract_co2_impact(raw_usage) -> float | None:
@@ -43,17 +50,74 @@ class AlbertOpenAIProvider(OpenAIProvider):
         return "albert_openai"
 
 
+def _extract_reasoning_delta(delta: Any) -> str:
+    """Return the reasoning text carried by a streamed delta, or an empty string.
+
+    Albert streams gpt-oss reasoning in `delta.reasoning` and DeepSeek-style
+    models in `delta.reasoning_content`. Both are extra fields on the openai
+    SDK's ChoiceDelta (extra='allow'): pydantic exposes them as attributes and
+    in `model_extra`, so check both ways.
+    """
+    if delta is None:
+        return ""
+    model_extra = getattr(delta, "model_extra", None) or {}
+    for field_name in REASONING_DELTA_FIELDS:
+        value = getattr(delta, field_name, None)
+        if value is None:
+            value = model_extra.get(field_name)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+@dataclass
 class AlbertOpenAIStreamedResponse(OpenAIStreamedResponse):
-    """Streamed response that preserves Albert's carbon/impacts usage fields."""
+    """Streamed response that preserves Albert's carbon/impacts usage fields.
+
+    It also counts the reasoning text streamed in `delta.reasoning` /
+    `delta.reasoning_content`: Albert's `usage.completion_tokens` (and hence its
+    CO2 figure) excludes reasoning tokens, so the length is stored in
+    `usage.details["reasoning_chars"]` for chat.footprint to estimate them
+    (`reasoning_tokens_from_details`). When the provider does report
+    `completion_tokens_details.reasoning_tokens`, it is kept in
+    `details["reasoning_tokens"]` and takes precedence.
+    """
+
+    # Characters of reasoning seen so far, and how many were already flushed
+    # into usage details, so the count is only reported once per usage chunk.
+    _reasoning_chars: int = field(default=0, init=False)
+    _reasoning_chars_reported: int = field(default=0, init=False)
+
+    def _map_thinking_delta(
+        self, choice: chat_completion_chunk.Choice
+    ) -> Iterable[ModelResponseStreamEvent]:
+        """Accumulate streamed reasoning length before the parent maps it to events."""
+        reasoning = _extract_reasoning_delta(choice.delta)
+        if reasoning:
+            self._reasoning_chars = getattr(self, "_reasoning_chars", 0) + len(reasoning)
+        yield from super()._map_thinking_delta(choice)
 
     def _map_usage(self, response: ChatCompletionChunk) -> Any:
-        """Override to extract Albert's carbon impact data from usage."""
+        """Override to extract Albert's carbon impact data and reasoning counts from usage."""
         result = super()._map_usage(response)
 
         if response.usage:
             co2_impact = _extract_co2_impact(response.usage)
             if co2_impact:
                 result.details["co2_impact_factor_20"] = _convert_impact_to_factor_20(co2_impact)
+
+            completion_details = getattr(response.usage, "completion_tokens_details", None)
+            reasoning_tokens = getattr(completion_details, "reasoning_tokens", None)
+            if isinstance(reasoning_tokens, int) and reasoning_tokens > 0:
+                result.details["reasoning_tokens"] = reasoning_tokens
+
+            # Usage chunks are cumulated by pydantic-ai (RunUsage += RequestUsage),
+            # so only report the characters not yet flushed.
+            seen = getattr(self, "_reasoning_chars", 0)
+            reported = getattr(self, "_reasoning_chars_reported", 0)
+            if seen > reported:
+                result.details["reasoning_chars"] = seen - reported
+                self._reasoning_chars_reported = seen
         return result
 
 

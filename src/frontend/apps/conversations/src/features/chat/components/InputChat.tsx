@@ -14,7 +14,7 @@ import { Box, Loader, Text } from '@/components';
 import { useToast } from '@/components/ToastProvider';
 import { useConfig, useFeatureEnabled } from '@/core';
 import { useAssistantHealth } from '@/features/chat/api/useAssistantHealth';
-import { LLMModel } from '@/features/chat/api/useLLMConfiguration';
+import { LLMModel, TierSlug } from '@/features/chat/api/useLLMConfiguration';
 import { ChatErrorType } from '@/features/chat/components/ChatError';
 import { InputChatActions } from '@/features/chat/components/InputChatAction';
 import { InputChatBanner } from '@/features/chat/components/InputChatBanner';
@@ -51,7 +51,9 @@ interface InputChatProps {
   forceWebSearch?: boolean;
   onToggleWebSearch?: () => void;
   onStop?: () => void;
-  selectedModel?: LLMModel | null;
+  selectedTier?: TierSlug;
+  onTierSelect?: (tier: TierSlug) => void;
+  selectedModelHrid?: string | null;
   onModelSelect?: (model: LLMModel) => void;
   isUploadingFiles?: boolean;
   isIndexingFiles?: boolean;
@@ -149,7 +151,9 @@ export const InputChat = ({
   forceWebSearch = false,
   onToggleWebSearch,
   onStop,
-  selectedModel,
+  selectedTier,
+  onTierSelect,
+  selectedModelHrid,
   onModelSelect,
   isUploadingFiles = false,
   isIndexingFiles = false,
@@ -608,8 +612,10 @@ export const InputChat = ({
                 onWebSearchToggle={
                   onToggleWebSearch ? handleWebSearchToggle : undefined
                 }
+                onTierSelect={onTierSelect}
+                selectedTier={selectedTier}
                 onModelSelect={onModelSelect}
-                selectedModel={selectedModel || null}
+                selectedModelHrid={selectedModelHrid}
                 status={status}
                 inputHasContent={Boolean(input?.trim())}
                 sendDisabled={cooldownRemaining > 0}

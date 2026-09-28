@@ -4,19 +4,21 @@ import logging
 
 from django import forms
 from django.conf import settings
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
 from django.db.models import BigIntegerField, Exists, F, Func, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.template.defaultfilters import filesizeformat
 from django.urls import path, reverse
 from django.utils.html import format_html
 
 import httpx
+from solo.admin import SingletonModelAdmin
 
 from . import models
-from .arena_results import build_results
+from .arena_results import build_results, promote_challenger
+from .enums import RoutingTier
 from .model_health import set_model_health
 
 logger = logging.getLogger(__name__)
@@ -284,12 +286,12 @@ ALBERT_MODEL_LIST_TIMEOUT_SECONDS = 3
 NOT_CONFIGURED_GROUP = "Available on the provider, not configured (add to the LLM configuration)"
 
 
-def _configured_model_choices() -> list[tuple[str, str]]:
-    """Active models of the LLM configuration, as select choices."""
+def _configured_model_choices(role: str | None = None) -> list[tuple[str, str]]:
+    """Active models of the LLM configuration, as select choices, optionally by role."""
     return [
         (hrid, f"{model.human_readable_name} ({hrid})")
         for hrid, model in settings.LLM_CONFIGURATIONS.items()
-        if model.is_active
+        if model.is_active and (role is None or model.role == role)
     ]
 
 
@@ -360,18 +362,11 @@ class ArenaExperimentForm(forms.ModelForm):
             "name",
             "description",
             "is_active",
-            "champion_model_hrid",
+            "tier",
+            "reasoning_effort",
             "sampling_rate",
             "daily_cap_per_user",
             "min_votes_for_conclusion",
-            "champion_input_price_eur_per_mtok",
-            "champion_output_price_eur_per_mtok",
-        )
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields["champion_model_hrid"] = _model_choice_field(
-            "Champion (production model)", with_provider_list=False
         )
 
 
@@ -383,8 +378,7 @@ class ArenaChallengerForm(forms.ModelForm):
         fields = (
             "experiment",
             "model_hrid",
-            "input_price_eur_per_mtok",
-            "output_price_eur_per_mtok",
+            "is_control",
         )
 
     def __init__(self, *args, **kwargs):
@@ -398,7 +392,10 @@ class ArenaChallengerInline(admin.TabularInline):
     model = models.ArenaChallenger
     form = ArenaChallengerForm
     extra = 1
-    fields = ("model_hrid", "input_price_eur_per_mtok", "output_price_eur_per_mtok")
+    fields = (
+        "model_hrid",
+        "is_control",
+    )
 
 
 @admin.register(models.ArenaExperiment)
@@ -410,15 +407,16 @@ class ArenaExperimentAdmin(admin.ModelAdmin):
     list_display = (
         "name",
         "is_active",
+        "tier",
         "champion_model_hrid",
         "sampling_rate",
         "daily_cap_per_user",
         "challenger_list",
         "results_link",
     )
-    list_filter = ("is_active",)
+    list_filter = ("is_active", "tier")
     fieldsets = (
-        (None, {"fields": ("name", "description", "is_active")}),
+        (None, {"fields": ("name", "description", "is_active", "tier", "reasoning_effort")}),
         (
             "Sampling",
             {"fields": ("sampling_rate", "daily_cap_per_user", "min_votes_for_conclusion")},
@@ -427,25 +425,34 @@ class ArenaExperimentAdmin(admin.ModelAdmin):
             "Champion",
             {
                 "description": (
-                    "The champion is the model conversations are pinned to (the production "
-                    "model). It is on one side of every arena turn. The other side is ONE "
-                    "challenger drawn at random from the list below; which side each model is "
-                    "shown on is shuffled per turn. Conversations pinned to another model are "
-                    "never compared. Prices feed the cost columns of the results page."
+                    "The champion is the model of this experiment's tier, taken from the "
+                    "routing tier settings, and is on one side of every arena turn. The other "
+                    "side is ONE challenger drawn at random from the tier's alternatives "
+                    "below; which side each model is shown on is shuffled per turn. Turns "
+                    "routed to another tier are never compared here. Prices are not set here: "
+                    "they come from the LLM configuration of each model and are frozen on "
+                    "every comparison when inference starts."
                 ),
-                "fields": (
-                    "champion_model_hrid",
-                    "champion_input_price_eur_per_mtok",
-                    "champion_output_price_eur_per_mtok",
-                ),
+                "fields": (),
             },
         ),
     )
 
+    @admin.display(description="Champion")
+    def champion_model_hrid(self, obj):
+        """Model of the experiment's tier, read from the routing tier settings."""
+        return obj.champion_model_hrid
+
     @admin.display(description="Challengers")
     def challenger_list(self, obj):
-        """Comma separated challenger hrids."""
-        return ", ".join(obj.challengers.values_list("model_hrid", flat=True)) or "-"
+        """Comma separated challenger hrids, the control one marked as such."""
+        return (
+            ", ".join(
+                f"{c.model_hrid} (control)" if c.is_control else c.model_hrid
+                for c in obj.challengers.all()
+            )
+            or "-"
+        )
 
     @admin.display(description="Results")
     def results_link(self, obj):
@@ -460,6 +467,11 @@ class ArenaExperimentAdmin(admin.ModelAdmin):
                 "<uuid:object_id>/results/",
                 self.admin_site.admin_view(self.results_view),
                 name="chat_arenaexperiment_results",
+            ),
+            path(
+                "<uuid:object_id>/promote/",
+                self.admin_site.admin_view(self.promote_view),
+                name="chat_arenaexperiment_promote",
             ),
         ]
         return custom + super().get_urls()
@@ -481,8 +493,48 @@ class ArenaExperimentAdmin(admin.ModelAdmin):
             "title": f"Arena results: {experiment.name}",
             "experiment": experiment,
             "results": results,
+            # Descriptive statistics (latency, tokens, energy, cost over time) live on
+            # the Langfuse "Router" dashboard, not here (router spec 12).
+            "langfuse_url": settings.LANGFUSE_HOST if settings.LANGFUSE_ENABLED else "",
+            # The three tag tables of router spec 8.1, rendered by one template loop.
+            "tag_tables": [
+                {"label": "domain", "rows": results["by_domain"]},
+                {"label": "task", "rows": results["by_task"]},
+                {"label": "context", "rows": results["by_context_tags"]},
+            ],
         }
         return render(request, "admin/chat/arenaexperiment/results.html", context)
+
+    def promote_view(self, request, object_id):
+        """Write a challenger into the tier settings and log the decision (router spec 8.1).
+
+        POST only and CSRF protected like every admin form, behind its own
+        ``promote_routing_champion`` permission: reading results and changing what
+        production runs are two different rights.
+        """
+        if request.method != "POST":
+            raise PermissionDenied("Promotion is a POST action.")
+        if not request.user.has_perm("chat.promote_routing_champion"):
+            raise PermissionDenied
+        experiment = get_object_or_404(models.ArenaExperiment, pk=object_id)
+        results_url = reverse("admin:chat_arenaexperiment_results", args=[experiment.pk])
+        try:
+            history = promote_challenger(
+                experiment, request.POST.get("model_hrid", ""), user=request.user
+            )
+        except ValueError as exc:
+            self.message_user(request, str(exc), level=messages.ERROR)
+            return redirect(results_url)
+        self.message_user(
+            request,
+            (
+                f"{history.to_value} is now the {history.tier} tier model"
+                f" (was {history.from_value}), which stays as an alternative."
+                " Close this experiment and open a new one against the new champion."
+            ),
+            level=messages.SUCCESS,
+        )
+        return redirect(results_url)
 
 
 @admin.register(models.ArenaComparison)
@@ -492,6 +544,10 @@ class ArenaComparisonAdmin(admin.ModelAdmin):
     list_display = (
         "drawn_at",
         "experiment",
+        "origin",
+        "tier",
+        "domain",
+        "task",
         "challenger_model_hrid",
         "champion_side",
         "status",
@@ -499,13 +555,123 @@ class ArenaComparisonAdmin(admin.ModelAdmin):
         "context_tags",
         "is_seed",
     )
-    list_filter = ("experiment", "status", "winner", "challenger_model_hrid", "is_seed")
+    list_filter = (
+        "experiment",
+        "origin",
+        "tier",
+        "domain",
+        "task",
+        "status",
+        "winner",
+        "challenger_model_hrid",
+        "is_seed",
+    )
     date_hierarchy = "drawn_at"
     search_fields = ("conversation__id", "user__email")
     readonly_fields = [
         field.name
         for field in models.ArenaComparison._meta.fields  # noqa: SLF001 # pylint: disable=protected-access
     ]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# Router tiers
+# --------------------------------------------------------------------------- #
+
+
+class RoutingTierSettingsForm(forms.ModelForm):
+    """Tier models picked from the configured chat models, alternatives as a multi-select."""
+
+    class Meta:  # pylint: disable=missing-class-docstring
+        model = models.RoutingTierSettings
+        fields = (
+            "simple_model_hrid",
+            "simple_alternatives",
+            "standard_model_hrid",
+            "standard_alternatives",
+            "complex_model_hrid",
+            "complex_alternatives",
+            "router_model_hrid",
+            "confidence_threshold",
+            "high_effort_threshold",
+            "tier_energy",
+        )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        chat_models = _configured_model_choices(role="chat")
+        for tier in RoutingTier:
+            default = models.default_tier_model_hrid(tier)
+            self.fields[f"{tier.value}_model_hrid"] = forms.ChoiceField(
+                label=f"{tier.value.capitalize()} model",
+                required=False,
+                choices=[("", f"Use the setting ({default})"), *chat_models],
+                widget=DisablingSelect(),
+                help_text=self.fields[f"{tier.value}_model_hrid"].help_text,
+            )
+            self.fields[f"{tier.value}_alternatives"] = forms.MultipleChoiceField(
+                label=f"{tier.value.capitalize()} alternatives",
+                required=False,
+                choices=chat_models,
+                widget=forms.SelectMultiple(attrs={"size": min(len(chat_models), 8) or 1}),
+                help_text=self.fields[f"{tier.value}_alternatives"].help_text,
+            )
+        self.fields["router_model_hrid"] = forms.ChoiceField(
+            label="Router model",
+            required=False,
+            choices=[("", "Use the LLM_ROUTER_MODEL_HRID setting"), *_configured_model_choices()],
+            help_text=self.fields["router_model_hrid"].help_text,
+        )
+
+    def clean(self):
+        cleaned = super().clean()
+        for tier in RoutingTier:
+            # MultipleChoiceField yields a list of strings, which is what the JSON field stores.
+            cleaned[f"{tier.value}_alternatives"] = list(
+                cleaned.get(f"{tier.value}_alternatives") or []
+            )
+        return cleaned
+
+
+@admin.register(models.RoutingTierSettings)
+class RoutingTierSettingsAdmin(SingletonModelAdmin):
+    """Admin for the RoutingTierSettings singleton."""
+
+    form = RoutingTierSettingsForm
+    fieldsets = (
+        ("Tier 1: simple", {"fields": ("simple_model_hrid", "simple_alternatives")}),
+        ("Tier 2: standard", {"fields": ("standard_model_hrid", "standard_alternatives")}),
+        ("Tier 3: complex", {"fields": ("complex_model_hrid", "complex_alternatives")}),
+        (
+            "Router",
+            {"fields": ("router_model_hrid", "confidence_threshold", "high_effort_threshold")},
+        ),
+        ("Energy", {"fields": ("tier_energy",)}),
+    )
+
+
+@admin.register(models.RoutingTierHistory)
+class RoutingTierHistoryAdmin(admin.ModelAdmin):
+    """Read-only log of tier changes."""
+
+    list_display = ("changed_at", "tier", "reason", "from_value", "to_value", "changed_by")
+    list_filter = ("tier", "reason")
+    readonly_fields = (
+        "tier",
+        "changed_at",
+        "changed_by",
+        "reason",
+        "from_value",
+        "to_value",
+        "evidence",
+    )
+    ordering = ("-changed_at",)
 
     def has_add_permission(self, request):
         return False

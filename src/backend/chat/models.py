@@ -11,6 +11,7 @@ from django.db import models
 from django.utils import timezone
 
 from django_pydantic_field import SchemaField
+from solo.models import SingletonModel
 
 from core.file_upload.enums import AttachmentStatus
 from core.models import BaseModel
@@ -19,11 +20,18 @@ from chat.ai_sdk_types import UIMessage
 from chat.constants import HISTORY_SUMMARY_CLAIM_TTL_SECONDS
 from chat.enums import (
     ArenaComparisonStatus,
+    ArenaOrigin,
     ArenaRole,
     ArenaSide,
     ArenaVoteOutcome,
     AttachmentIndexState,
     CollectionIndexState,
+    ReasoningEffort,
+    RoutingDomain,
+    RoutingReason,
+    RoutingTask,
+    RoutingTier,
+    TierSource,
 )
 
 User = get_user_model()
@@ -210,6 +218,26 @@ class ChatConversation(BaseModel):
         blank=True,
         help_text="When a worker claimed summary generation; claims expire after "
         "HISTORY_SUMMARY_CLAIM_TTL_SECONDS (dead-worker liveness bound)",
+    )
+
+    pinned_tier = models.CharField(
+        max_length=20,
+        choices=RoutingTier.choices(),
+        null=True,
+        blank=True,
+        help_text=(
+            "Complexity tier the user pinned on this conversation (router spec 5.3)."
+            " Null means Auto: the router picks the tier on every turn."
+        ),
+    )
+
+    last_routing = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Routing decision of the last turn (tier, model_hrid and classifier labels),"
+            " used as a hint by the router on the next turn."
+        ),
     )
 
     class Meta:  # pylint: disable=missing-class-docstring
@@ -434,10 +462,24 @@ class ArenaExperiment(BaseModel):
         default=False,
         help_text="Only one experiment can be active at a time.",
     )
-    champion_model_hrid = models.CharField(
-        max_length=100,
-        default=default_champion_hrid,
-        help_text="HRID of the production model every challenger is compared against.",
+    tier = models.CharField(
+        max_length=20,
+        choices=RoutingTier.choices(),
+        default=RoutingTier.STANDARD.value,
+        help_text=(
+            "Complexity tier this experiment runs on. The champion is that tier's model"
+            " in the routing tier settings; challengers are drawn from its alternatives."
+        ),
+    )
+    reasoning_effort = models.CharField(
+        max_length=10,
+        choices=ReasoningEffort.choices(),
+        null=True,
+        blank=True,
+        help_text=(
+            "Forces both sides of a tier 3 experiment to this reasoning effort. Empty"
+            " means the router's per-turn effort applies to both sides."
+        ),
     )
     sampling_rate = models.FloatField(
         default=0.1,
@@ -455,44 +497,69 @@ class ArenaExperiment(BaseModel):
             "results page. A label, not a gate."
         ),
     )
-    champion_input_price_eur_per_mtok = models.DecimalField(
-        max_digits=10,
-        decimal_places=4,
-        default=0,
-        help_text="Champion price in EUR per million input tokens.",
-    )
-    champion_output_price_eur_per_mtok = models.DecimalField(
-        max_digits=10,
-        decimal_places=4,
-        default=0,
-        help_text="Champion price in EUR per million output tokens.",
-    )
 
     class Meta:  # pylint: disable=missing-class-docstring
         ordering = ["-created_at"]
-        permissions = [("view_arena_results", "Can view arena results")]
+        permissions = [
+            ("view_arena_results", "Can view arena results"),
+            ("promote_routing_champion", "Can promote an arena challenger to the tier model"),
+        ]
 
     def __str__(self):
         return self.name
 
+    @property
+    def champion_model_hrid(self) -> str:
+        """Model of the experiment's tier: the champion every challenger runs against.
+
+        Read from ``RoutingTierSettings`` at each access, so promoting a challenger
+        immediately moves the champion of every later draw. The value in force at
+        draw time is snapshotted on the comparison.
+        """
+        return RoutingTierSettings.get_solo().model_for(self.tier)
+
+    def tier_alternatives(self) -> list[str]:
+        """Closed list of models a challenger of this experiment may be picked from."""
+        return RoutingTierSettings.get_solo().alternatives_for(self.tier)
+
     def clean(self):
-        """Enforce a single active experiment and a configured champion."""
+        """One active experiment per tier, and challengers inside the tier's alternatives."""
         super().clean()
-        if self.champion_model_hrid not in settings.LLM_CONFIGURATIONS:
-            raise ValidationError(
-                {"champion_model_hrid": "This model is not in the LLM configuration."}
-            )
         if self.is_active:
-            others = ArenaExperiment.objects.filter(is_active=True).exclude(pk=self.pk)
+            others = ArenaExperiment.objects.filter(is_active=True, tier=self.tier).exclude(
+                pk=self.pk
+            )
             if others.exists():
                 raise ValidationError(
-                    {"is_active": "Another experiment is already active. Deactivate it first."}
+                    {
+                        "is_active": (
+                            f"Another experiment is already active on the {self.tier} tier."
+                            " Deactivate it first."
+                        )
+                    }
+                )
+        if self.pk:
+            alternatives = self.tier_alternatives()
+            outside = [
+                challenger.model_hrid
+                for challenger in self.challengers.all()
+                if not challenger.is_control and challenger.model_hrid not in alternatives
+            ]
+            if outside:
+                raise ValidationError(
+                    {
+                        "tier": (
+                            f"{', '.join(outside)} is not an alternative of the {self.tier} tier."
+                            " Add it to the tier settings, flag it as a control, or remove it."
+                        )
+                    }
                 )
 
     @property
     def champion_tools(self) -> list[str]:
         """Tool list configured on the champion, used to validate challengers."""
-        return list(settings.LLM_CONFIGURATIONS[self.champion_model_hrid].tools)
+        configuration = settings.LLM_CONFIGURATIONS.get(self.champion_model_hrid)
+        return list(configuration.tools) if configuration else []
 
 
 class ArenaChallenger(BaseModel):
@@ -502,11 +569,13 @@ class ArenaChallenger(BaseModel):
         ArenaExperiment, related_name="challengers", on_delete=models.CASCADE
     )
     model_hrid = models.CharField(max_length=100)
-    input_price_eur_per_mtok = models.DecimalField(
-        max_digits=10, decimal_places=4, default=0, help_text="EUR per million input tokens."
-    )
-    output_price_eur_per_mtok = models.DecimalField(
-        max_digits=10, decimal_places=4, default=0, help_text="EUR per million output tokens."
+    is_control = models.BooleanField(
+        default=False,
+        help_text=(
+            "Out-of-tier control challenger used only to tune the classifier threshold"
+            " (router spec 5.4). Drawn on 5% of the experiment's draws, excluded from the"
+            " challenger scoreboard and from promotion, shown in its own column."
+        ),
     )
 
     class Meta:  # pylint: disable=missing-class-docstring
@@ -523,7 +592,9 @@ class ArenaChallenger(BaseModel):
         """A challenger must be a configured, active model with the champion's tool list.
 
         Same tools on both sides keeps the comparison about the model, not the
-        configuration.
+        configuration. It must also belong to the tier's alternatives: the arena
+        compares within a tier (router spec 2). The only exception is the control
+        challenger of section 5.4, which exists precisely to be out of tier.
         """
         super().clean()
         configuration = settings.LLM_CONFIGURATIONS.get(self.model_hrid)
@@ -535,6 +606,16 @@ class ArenaChallenger(BaseModel):
             return
         if self.model_hrid == self.experiment.champion_model_hrid:
             raise ValidationError({"model_hrid": "The champion cannot be its own challenger."})
+        if not self.is_control and self.model_hrid not in self.experiment.tier_alternatives():
+            raise ValidationError(
+                {
+                    "model_hrid": (
+                        "This model is not an alternative of the"
+                        f" {self.experiment.tier} tier. Add it to the routing tier settings"
+                        " or flag this challenger as a control."
+                    )
+                }
+            )
         if sorted(configuration.tools) != sorted(self.experiment.champion_tools):
             raise ValidationError(
                 {
@@ -579,8 +660,29 @@ class ArenaComparison(BaseModel):
     tools_stripped = models.BooleanField(
         default=False, help_text="Side-effect tools were removed from both models."
     )
-    theme = models.CharField(max_length=50, blank=True, default="")
     is_seed = models.BooleanField(default=False, help_text="Created by the demo seed command.")
+    origin = models.CharField(
+        max_length=10,
+        choices=ArenaOrigin.choices(),
+        default=ArenaOrigin.DRAW.value,
+        help_text="draw: sampled by the arena. manual: asked for with the second-opinion button.",
+    )
+
+    # Routing labels of the turn, copied from its RoutingDecision (router spec 5.5).
+    tier = models.CharField(max_length=20, choices=RoutingTier.choices(), blank=True, default="")
+    tier_source = models.CharField(
+        max_length=20, choices=TierSource.choices(), blank=True, default=""
+    )
+    domain = models.CharField(
+        max_length=30, choices=RoutingDomain.choices(), blank=True, default=""
+    )
+    task = models.CharField(max_length=30, choices=RoutingTask.choices(), blank=True, default="")
+    router_confidence = models.FloatField(null=True, blank=True)
+    router_reason = models.CharField(
+        max_length=30, choices=RoutingReason.choices(), blank=True, default=""
+    )
+    router_model_hrid = models.CharField(max_length=100, blank=True, default="")
+    router_prompt_version = models.CharField(max_length=50, blank=True, default="")
 
     champion_model_hrid = models.CharField(max_length=100)
     challenger_model_hrid = models.CharField(max_length=100)
@@ -609,6 +711,11 @@ class ArenaComparison(BaseModel):
     champion_latency_ms = models.PositiveIntegerField(null=True, blank=True)
     champion_first_token_ms = models.PositiveIntegerField(null=True, blank=True)
     champion_co2_impact = models.FloatField(null=True, blank=True)
+    champion_co2_source = models.CharField(max_length=30, blank=True, default="")
+    champion_reasoning_tokens = models.PositiveIntegerField(null=True, blank=True)
+    champion_reasoning_effort = models.CharField(
+        max_length=10, choices=ReasoningEffort.choices(), blank=True, default=""
+    )
     champion_trace_id = models.CharField(max_length=100, blank=True, default="")
     champion_finished_at = models.DateTimeField(null=True, blank=True)
     champion_error = models.TextField(blank=True, default="")
@@ -627,6 +734,11 @@ class ArenaComparison(BaseModel):
     challenger_latency_ms = models.PositiveIntegerField(null=True, blank=True)
     challenger_first_token_ms = models.PositiveIntegerField(null=True, blank=True)
     challenger_co2_impact = models.FloatField(null=True, blank=True)
+    challenger_co2_source = models.CharField(max_length=30, blank=True, default="")
+    challenger_reasoning_tokens = models.PositiveIntegerField(null=True, blank=True)
+    challenger_reasoning_effort = models.CharField(
+        max_length=10, choices=ReasoningEffort.choices(), blank=True, default=""
+    )
     challenger_trace_id = models.CharField(max_length=100, blank=True, default="")
     challenger_finished_at = models.DateTimeField(null=True, blank=True)
     challenger_error = models.TextField(blank=True, default="")
@@ -637,6 +749,8 @@ class ArenaComparison(BaseModel):
         indexes = [
             models.Index(fields=["experiment", "status"]),
             models.Index(fields=["user", "drawn_at"]),
+            # The second-opinion endpoint asks which alternatives a turn already tried.
+            models.Index(fields=["conversation", "turn"]),
         ]
 
     def __str__(self):
@@ -680,3 +794,169 @@ class ArenaComparison(BaseModel):
             self.side_succeeded(role) and getattr(self, f"{role}_payload")
             for role in (ArenaRole.CHAMPION, ArenaRole.CHALLENGER)
         )
+
+
+# --------------------------------------------------------------------------- #
+# Router tiers (docs/llm-router-spec.md section 9)
+# --------------------------------------------------------------------------- #
+
+TIER_MODEL_SETTING_NAMES = {
+    RoutingTier.SIMPLE: "LLM_TIER_SIMPLE_MODEL_HRID",
+    RoutingTier.STANDARD: "LLM_TIER_STANDARD_MODEL_HRID",
+    RoutingTier.COMPLEX: "LLM_TIER_COMPLEX_MODEL_HRID",
+}
+
+
+def default_tier_model_hrid(tier: str) -> str:
+    """Model configured for ``tier`` in the Django settings, else the default model."""
+    setting_name = TIER_MODEL_SETTING_NAMES[RoutingTier(tier)]
+    return getattr(settings, setting_name, "") or settings.LLM_DEFAULT_MODEL_HRID
+
+
+def _tier_field_help(what: str) -> str:
+    return (
+        f"{what} Blank means 'use the LLM_TIER_*_MODEL_HRID setting', which itself"
+        " defaults to LLM_DEFAULT_MODEL_HRID."
+    )
+
+
+class RoutingTierSettings(SingletonModel):
+    """Singleton holding the model of each complexity tier and the router thresholds.
+
+    "Model" is what the tier runs; "alternatives" is the closed list from which
+    arena challengers for that tier are drawn and which the constraint walk tries
+    when the tier model lacks a capability (spec 3.1 and 5.1).
+    """
+
+    simple_model_hrid = models.CharField(
+        max_length=100, blank=True, default="", help_text=_tier_field_help("Tier 1 model.")
+    )
+    simple_alternatives = models.JSONField(
+        default=list, blank=True, help_text="HRIDs of the tier 1 alternatives."
+    )
+    standard_model_hrid = models.CharField(
+        max_length=100, blank=True, default="", help_text=_tier_field_help("Tier 2 model.")
+    )
+    standard_alternatives = models.JSONField(
+        default=list, blank=True, help_text="HRIDs of the tier 2 alternatives."
+    )
+    complex_model_hrid = models.CharField(
+        max_length=100, blank=True, default="", help_text=_tier_field_help("Tier 3 model.")
+    )
+    complex_alternatives = models.JSONField(
+        default=list, blank=True, help_text="HRIDs of the tier 3 alternatives."
+    )
+    router_model_hrid = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text="Classifier model. Blank means 'use the LLM_ROUTER_MODEL_HRID setting'.",
+    )
+    confidence_threshold = models.FloatField(
+        default=0.70,
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
+        help_text="Tiers 1 and 3 are chosen only at or above this classifier confidence.",
+    )
+    high_effort_threshold = models.FloatField(
+        default=0.90,
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
+        help_text="Tier 3 runs at high reasoning effort at or above this confidence.",
+    )
+    tier_energy = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Per tier: {wh_per_answer, n, source: estimated|measured, updated_at}."
+            " Refreshed from Langfuse by the refresh_tier_energy command."
+        ),
+    )
+
+    class Meta:  # pylint: disable=missing-class-docstring
+        verbose_name = "Routing Tier Settings"
+
+    def __str__(self):
+        return "Routing tier settings"
+
+    def model_for(self, tier: str) -> str:
+        """HRID of the model running ``tier``: the admin value, else the settings."""
+        tier = RoutingTier(tier)
+        return getattr(self, f"{tier.value}_model_hrid") or default_tier_model_hrid(tier)
+
+    def alternatives_for(self, tier: str) -> list[str]:
+        """HRIDs of the alternatives of ``tier``, the tier model excluded."""
+        tier = RoutingTier(tier)
+        model_hrid = self.model_for(tier)
+        alternatives = getattr(self, f"{tier.value}_alternatives") or []
+        kept: list[str] = []
+        for hrid in alternatives:
+            if hrid and hrid != model_hrid and hrid not in kept:
+                kept.append(hrid)
+        return kept
+
+    def all_models_for(self, tier: str) -> list[str]:
+        """The tier model first, then its alternatives, without duplicates."""
+        seen: list[str] = []
+        for hrid in [self.model_for(tier), *self.alternatives_for(tier)]:
+            if hrid not in seen:
+                seen.append(hrid)
+        return seen
+
+    def clean(self):
+        """Every referenced model must be an active chat model of the configuration."""
+        super().clean()
+        errors = {}
+        for tier in RoutingTier:
+            for field_name, hrids in (
+                (f"{tier.value}_model_hrid", [getattr(self, f"{tier.value}_model_hrid")]),
+                (f"{tier.value}_alternatives", getattr(self, f"{tier.value}_alternatives") or []),
+            ):
+                if not isinstance(hrids, list):
+                    errors[field_name] = "Expected a list of model HRIDs."
+                    continue
+                for hrid in hrids:
+                    if not hrid:
+                        continue
+                    configuration = settings.LLM_CONFIGURATIONS.get(hrid)
+                    if configuration is None or configuration.role != "chat":
+                        errors[field_name] = (
+                            f"'{hrid}' is not a chat model of the LLM configuration."
+                        )
+                        break
+        if self.router_model_hrid and self.router_model_hrid not in settings.LLM_CONFIGURATIONS:
+            errors["router_model_hrid"] = "This model is not in the LLM configuration."
+        if errors:
+            raise ValidationError(errors)
+
+
+class RoutingTierHistory(models.Model):
+    """Append-only log of the changes made to a tier (promotion, threshold, manual)."""
+
+    class Reason(models.TextChoices):  # pylint: disable=missing-class-docstring
+        PROMOTION = "promotion"
+        THRESHOLD = "threshold"
+        MANUAL = "manual"
+
+    tier = models.CharField(max_length=20, choices=RoutingTier.choices())
+    changed_at = models.DateTimeField(auto_now_add=True)
+    changed_by = models.ForeignKey(
+        User,
+        related_name="routing_tier_changes",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    reason = models.CharField(max_length=20, choices=Reason.choices)
+    from_value = models.TextField(blank=True, default="")
+    to_value = models.TextField(blank=True, default="")
+    evidence = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Experiment id, votes, win rate, confidence interval, Wh ratio...",
+    )
+
+    class Meta:  # pylint: disable=missing-class-docstring
+        ordering = ["-changed_at"]
+        verbose_name_plural = "Routing tier history"
+
+    def __str__(self):
+        return f"{self.tier}: {self.from_value} -> {self.to_value} ({self.reason})"

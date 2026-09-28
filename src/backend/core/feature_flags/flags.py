@@ -47,6 +47,12 @@ class FeatureFlags(BaseModel):
     presentation_generation: FeatureToggle = FeatureToggle.DISABLED
     # Blind A/B comparison of the production model against challengers (see docs/arena-mvp-spec.md)
     arena: FeatureToggle = FeatureToggle.DISABLED
+    # LLM router: complexity tiers, Auto captions, tier selector (see docs/llm-router-spec.md)
+    router: FeatureToggle = FeatureToggle.DISABLED
+    # "Essayer une autre réponse": user-triggered same-tier comparison
+    arena_manual: FeatureToggle = FeatureToggle.DISABLED
+    # Staff-only raw model picker and `model_hrid` override (dev/staging debugging)
+    dev_model_picker: FeatureToggle = FeatureToggle.DISABLED
 
     def __getattr__(self, name: str):
         """Dynamically get specific RAG document search tool feature flags from settings."""

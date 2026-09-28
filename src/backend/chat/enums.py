@@ -97,3 +97,113 @@ class ArenaContextTag(StrEnum):
     WEB_SEARCH = "web_search"
     ATTACHMENT = "attachment"
     PROJECT = "project"
+
+
+class ArenaOrigin(StrEnum):
+    """How a comparison came to exist (router spec 8.1 and 8.2)."""
+
+    DRAW = "draw"  # Sampled by the arena on an eligible turn
+    MANUAL = "manual"  # Asked for by the user with the second-opinion button
+
+    @classmethod
+    def choices(cls):
+        """Return a list of tuples for each enum member."""
+        return [(member.value, member.name) for member in cls]
+
+
+class RoutingTier(StrEnum):
+    """Complexity tier a turn is routed to. Ordinal: simple < standard < complex."""
+
+    SIMPLE = "simple"
+    STANDARD = "standard"
+    COMPLEX = "complex"
+
+    @classmethod
+    def choices(cls):
+        """Return a list of tuples for each enum member."""
+        return [(member.value, member.name) for member in cls]
+
+
+class RoutingDomain(StrEnum):
+    """Domain tag produced by the router classifier (spec 4.1)."""
+
+    GENERAL = "general"
+    ADMINISTRATIVE = "administrative"
+    LEGAL = "legal"
+    HEALTH = "health"
+    FINANCE = "finance"
+    HR = "hr"
+    IT_SOFTWARE = "it_software"
+    SCIENCE_EDUCATION = "science_education"
+    COMMUNICATION = "communication"
+    DEFENSE_SECURITY = "defense_security"
+    ENVIRONMENT = "environment"
+    CULTURE_SOCIETY = "culture_society"
+
+    @classmethod
+    def choices(cls):
+        """Return a list of tuples for each enum member."""
+        return [(member.value, member.name) for member in cls]
+
+
+class RoutingTask(StrEnum):
+    """Task tag produced by the router classifier (spec 4.2)."""
+
+    QA_KNOWLEDGE = "qa_knowledge"
+    WRITING = "writing"
+    SUMMARIZATION = "summarization"
+    TRANSLATION = "translation"
+    CODING = "coding"
+    DATA_ANALYSIS = "data_analysis"
+    DOCUMENT_QA = "document_qa"
+    RESEARCH = "research"
+    REASONING = "reasoning"
+    BRAINSTORM_CREATIVE = "brainstorm_creative"
+    CLASSIFICATION_EXTRACTION = "classification_extraction"
+    CONVERSATION = "conversation"
+
+    @classmethod
+    def choices(cls):
+        """Return a list of tuples for each enum member."""
+        return [(member.value, member.name) for member in cls]
+
+
+class RoutingReason(StrEnum):
+    """Why the router landed on a tier (spec 5.5, `router_reason`)."""
+
+    CLASSIFIED = "classified"  # The classifier ran and its complexity was used
+    SHORTCUT = "shortcut"  # The classifier call was skipped (short follow-up)
+    CONSTRAINT = "constraint"  # A capability constraint raised the tier
+    CONSTRAINT_FALLBACK = "constraint_fallback"  # No tier model fits; default model used
+    FALLBACK = "fallback"  # Classifier timeout or error
+    USER_PINNED = "user_pinned"  # The user pinned a tier on the conversation
+
+    @classmethod
+    def choices(cls):
+        """Return a list of tuples for each enum member."""
+        return [(member.value, member.name) for member in cls]
+
+
+class TierSource(StrEnum):
+    """Who decided the tier for a turn (spec 5.5, `tier_source`)."""
+
+    ROUTER = "router"
+    USER = "user"
+    CONSTRAINT = "constraint"
+
+    @classmethod
+    def choices(cls):
+        """Return a list of tuples for each enum member."""
+        return [(member.value, member.name) for member in cls]
+
+
+class ReasoningEffort(StrEnum):
+    """Reasoning effort requested from a reasoning-capable model (spec 3.2)."""
+
+    MEDIUM = "medium"
+    HIGH = "high"
+
+    @classmethod
+    def choices(cls):
+        """Return a list of tuples for each enum member."""
+        return [(member.value, member.name) for member in cls]

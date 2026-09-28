@@ -7,6 +7,7 @@ import factory.django
 from core.factories import UserFactory
 
 from . import models
+from .enums import RoutingTier
 
 
 class ChatProjectFactory(factory.django.DjangoModelFactory):
@@ -73,10 +74,11 @@ class ChatProjectAttachmentFactory(factory.django.DjangoModelFactory):
 
 
 class ArenaExperimentFactory(factory.django.DjangoModelFactory):
-    """Factory for arena experiments (inactive by default, champion = default model)."""
+    """Factory for arena experiments (inactive, on the standard tier by default)."""
 
     name = factory.Sequence(lambda n: f"experiment {n}")
     is_active = False
+    tier = RoutingTier.STANDARD.value
     sampling_rate = 1.0
     daily_cap_per_user = 100
 

@@ -103,8 +103,10 @@ def test_existing_conversation_keeps_pinned_model_even_if_param_changes(
     api_client, mock_openai_stream, hello_conversation_data
 ):
     # Pre-pin the conversation to fallback-1: it must stay there even when the
-    # request asks for "main-model" (or anything else).
-    conversation = ChatConversationFactory(owner__language="en-us", model_hrid="fallback-1")
+    # request asks for "main-model" (or anything else). The picker is staff only.
+    conversation = ChatConversationFactory(
+        owner__language="en-us", owner__is_staff=True, model_hrid="fallback-1"
+    )
 
     url = f"/api/v1.0/chats/{conversation.pk}/conversation/?model_hrid=main-model"
     api_client.force_login(conversation.owner)
@@ -124,8 +126,9 @@ def test_existing_conversation_keeps_pinned_model_even_if_param_changes(
 def test_explicit_non_default_model_in_request_is_pinned(
     api_client, mock_openai_stream, hello_conversation_data
 ):
-    # Picker selection in dev/staging: explicit non-default request goes through.
-    conversation = ChatConversationFactory(owner__language="en-us")
+    # Picker selection in dev/staging: explicit non-default request goes through
+    # for staff (the `dev_model_picker` flag is on in the test settings).
+    conversation = ChatConversationFactory(owner__language="en-us", owner__is_staff=True)
     url = f"/api/v1.0/chats/{conversation.pk}/conversation/?model_hrid=fallback-1"
     api_client.force_login(conversation.owner)
     response = api_client.post(url, hello_conversation_data, format="json")

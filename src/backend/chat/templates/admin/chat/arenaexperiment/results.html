@@ -34,7 +34,7 @@
 {% with h=results.header %}
 <div class="arena-results">
   <p>
-    Champion <strong>{{ experiment.champion_model_hrid }}</strong>,
+    Tier <strong>{{ experiment.tier }}</strong>, champion <strong>{{ results.champion.model_hrid }}</strong>{% if experiment.reasoning_effort %}, both sides at <strong>{{ experiment.reasoning_effort }}</strong> reasoning effort{% endif %},
     sampling rate {{ experiment.sampling_rate }}, daily cap {{ experiment.daily_cap_per_user }} per user,
     {% if experiment.is_active %}<strong>active</strong>{% else %}inactive{% endif %}.
   </p>
@@ -60,13 +60,22 @@
     <div class="arena-kpi"><span class="label">Pending</span><span class="value">{{ h.pending }}</span></div>
     <div class="arena-kpi"><span class="label">Votes / all comparisons</span><span class="value">{% if h.vote_rate is not None %}{% widthratio h.vote_rate 1 100 %}%{% else %}–{% endif %}</span></div>
     <div class="arena-kpi"><span class="label">Votes / closed comparisons</span><span class="value">{% if h.closed_vote_rate is not None %}{% widthratio h.closed_vote_rate 1 100 %}%{% else %}–{% endif %}</span></div>
-    <div class="arena-kpi"><span class="label">Recorded Arena cost</span><span class="value">{% if h.total_cost_eur is not None %}{{ h.total_cost_eur|floatformat:2 }} €{% else %}Unknown{% endif %}</span></div>
+    <div class="arena-kpi"><span class="label">Sampled draws</span><span class="value">{{ h.sampled }}</span></div>
+    <div class="arena-kpi"><span class="label">Second opinions</span><span class="value">{{ h.manual.comparisons }}</span></div>
+    <div class="arena-kpi"><span class="label">Control draws</span><span class="value">{{ h.control_comparisons }}</span></div>
     <div class="arena-kpi"><span class="label">Refused draws</span><span class="value">{{ h.refused_draws }}</span></div>
+    <div class="arena-kpi"><span class="label">Time to vote</span><span class="value">{% if results.champion.mean_time_to_vote_s is not None %}{{ results.champion.mean_time_to_vote_s|floatformat:0 }} s{% else %}–{% endif %}</span></div>
+    <div class="arena-kpi"><span class="label">Champion Wh / answer</span><span class="value">{% if results.champion.mean_wh_per_answer is not None %}{{ results.champion.mean_wh_per_answer|floatformat:2 }} Wh{% else %}–{% endif %}</span></div>
   </div>
   <p class="arena-note">Refused draws: turns that were sampled but whose conversation was not pinned to the champion (health fallback in effect).</p>
 
+  <p class="arena-note">
+    Latency, tokens, energy and cost over time are on the Langfuse <strong>Router</strong> dashboard,
+    filtered by tier, domain and task; every arena vote is pushed there as an <code>arena_preference</code> score.
+    {% if langfuse_url %}<a href="{{ langfuse_url }}" target="_blank" rel="noopener">Explorer dans Langfuse</a>.{% else %}Langfuse is disabled on this environment.{% endif %}
+  </p>
+
   <p>Vote coverage includes pending and errored comparisons. Closed vote rate includes voted, abandoned and errored comparisons ({{ h.closed }} closed). Pending comparisons close on an explicit cancellation, a new turn, or retention expiry; reading history never closes them.</p>
-  <p>Costs use the EUR per million token prices captured at each inference claim. {{ h.unpriced_answers }} answers have no recorded price and are excluded from the cost subtotal.</p>
   {% for reason, count in h.failure_reasons.items %}<p>{{ reason }}: {{ count }}</p>{% endfor %}
   <p>{{ results.champion.model_hrid }} failures: {{ results.champion.failures }} / {{ results.champion.attempts }} attempts.</p>
   {% for row in results.challengers %}<p>{{ row.model_hrid }} failures: {{ row.failures }} / {{ row.attempts }} attempts.</p>{% endfor %}
@@ -75,9 +84,7 @@
     <thead>
       <tr>
         <th>Challenger</th><th>Decisive votes</th><th>Win rate</th><th>95% interval</th>
-        <th>Both good</th><th>Both bad</th><th>Abandoned</th><th>Errored</th>
-        <th>Cost / answer</th><th>Champion cost / answer</th><th>Cost ratio</th>
-        <th>Latency</th><th>First token</th><th>Tokens out</th><th>CO₂ / answer</th><th>Time to vote</th>
+        <th>Cost ratio</th><th>Wh ratio</th><th>Verdict</th><th></th>
       </tr>
     </thead>
     <tbody>
@@ -87,18 +94,10 @@
         <td>{{ row.votes }}</td>
         <td>{% if row.win_rate is not None %}{% widthratio row.win_rate 1 100 %}%{% else %}–{% endif %}</td>
         <td>{% if row.ci_low is not None %}{% widthratio row.ci_low 1 100 %}% – {% widthratio row.ci_high 1 100 %}%{% else %}–{% endif %}</td>
-        <td>{{ row.ties }}</td>
-        <td>{{ row.both_bad }}</td>
-        <td>{{ row.abandoned }}</td>
-        <td>{{ row.errored }}</td>
-        <td>{% if row.mean_champion_cost_eur is not None %}{{ row.mean_champion_cost_eur|floatformat:5 }} €{% else %}–{% endif %}</td>
+        <td>baseline</td>
+        <td>baseline</td>
         <td>–</td>
-        <td>–</td>
-        <td>{% if row.mean_latency_ms is not None %}{{ row.mean_latency_ms|floatformat:0 }} ms{% else %}–{% endif %}</td>
-        <td>{% if row.mean_first_token_ms is not None %}{{ row.mean_first_token_ms|floatformat:0 }} ms{% else %}–{% endif %}</td>
-        <td>{% if row.mean_completion_tokens is not None %}{{ row.mean_completion_tokens|floatformat:0 }}{% else %}–{% endif %}</td>
-        <td>{% if row.mean_co2_kg is not None %}{{ row.mean_co2_kg|floatformat:6 }} kg{% else %}–{% endif %}</td>
-        <td>{% if row.mean_time_to_vote_s is not None %}{{ row.mean_time_to_vote_s|floatformat:0 }} s{% else %}–{% endif %}</td>
+        <td></td>
       </tr>
       {% endwith %}
       {% for row in results.challengers %}
@@ -107,31 +106,70 @@
         <td>{{ row.votes }}</td>
         <td>{% if row.win_rate is not None %}{% widthratio row.win_rate 1 100 %}%{% else %}–{% endif %}</td>
         <td>{% if row.ci_low is not None %}{% widthratio row.ci_low 1 100 %}% – {% widthratio row.ci_high 1 100 %}%{% else %}–{% endif %}</td>
-        <td>{{ row.ties }}</td>
-        <td>{{ row.both_bad }}</td>
-        <td>{{ row.abandoned }}</td>
-        <td>{{ row.errored }}</td>
-        <td>{% if row.mean_challenger_cost_eur is not None %}{{ row.mean_challenger_cost_eur|floatformat:5 }} €{% else %}–{% endif %}</td>
-        <td>{% if row.mean_champion_cost_eur is not None %}{{ row.mean_champion_cost_eur|floatformat:5 }} €{% else %}–{% endif %}</td>
-        <td>{% if row.cost_ratio %}×{{ row.cost_ratio|floatformat:2 }} cheaper{% else %}–{% endif %}</td>
-        <td>{% if row.mean_latency_ms is not None %}{{ row.mean_latency_ms|floatformat:0 }} ms{% else %}–{% endif %}</td>
-        <td>{% if row.mean_first_token_ms is not None %}{{ row.mean_first_token_ms|floatformat:0 }} ms{% else %}–{% endif %}</td>
-        <td>{% if row.mean_completion_tokens is not None %}{{ row.mean_completion_tokens|floatformat:0 }}{% else %}–{% endif %}</td>
-        <td>{% if row.mean_co2_kg is not None %}{{ row.mean_co2_kg|floatformat:6 }} kg{% else %}–{% endif %}</td>
-        <td>{% if row.mean_time_to_vote_s is not None %}{{ row.mean_time_to_vote_s|floatformat:0 }} s{% else %}–{% endif %}</td>
+        <td>{% if row.cost_multiple %}×{{ row.cost_multiple|floatformat:1 }} {{ row.cost_direction }}{% else %}–{% endif %}</td>
+        <td>{% if row.wh_ratio is not None %}×{{ row.wh_ratio|floatformat:2 }}{% else %}–{% endif %}</td>
+        <td class="arena-verdict arena-verdict-{{ row.verdict }}">{{ row.verdict }}</td>
+        <td>
+          {% if perms.chat.promote_routing_champion %}
+          <form method="post" action="{% url 'admin:chat_arenaexperiment_promote' experiment.pk %}">
+            {% csrf_token %}
+            <input type="hidden" name="model_hrid" value="{{ row.model_hrid }}">
+            <button type="submit" class="button">Promote</button>
+          </form>
+          {% endif %}
+        </td>
       </tr>
       {% empty %}
-      <tr><td colspan="16">No challenger yet.</td></tr>
+      <tr><td colspan="8">No challenger yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>
-  <p class="arena-note">Win rate is the share of decisive votes (a side was picked) where the challenger's answer was preferred; "both good" and "both bad" votes are counted separately. Results remain indicative until there are at least {{ h.threshold }} decisive votes and the 95% interval excludes 50%. Reaching the sample threshold alone does not establish a preference. Cost ratio is champion cost divided by challenger cost on the same turns.</p>
+  <p class="arena-note">This table is the promotion decision, nothing else: draws, failures, absolute cost, tokens and latency are observability and live on the Langfuse <strong>Router</strong> dashboard (per-side vote outcomes are the <code>arena_preference</code> score, sliceable by the <code>model:</code> and <code>arena_experiment:</code> trace tags). Win rate is the share of decisive votes (a side was picked) where the challenger's answer was preferred; "both good" and "both bad" votes are votes but not wins, and are counted in the header above. Results remain indicative until there are at least {{ h.threshold }} decisive votes and the 95% interval excludes 50%. Reaching the sample threshold alone does not establish a preference. Cost ratio is champion cost divided by challenger cost on the same turns, from the prices of the LLM configuration frozen on each comparison ({{ h.unpriced_answers }} answers have no recorded price); it stays here rather than in Langfuse because Langfuse prices are USD estimates and cannot be restricted to the turns of one comparison. Wh ratio is the challenger's mean Wh per answer over the champion's, from our own EcoLogits figures — Langfuse cannot compute Wh. Verdict: <strong>promote</strong> when the interval is entirely above 50%, <strong>promote_for_footprint</strong> when it still includes 50% but the challenger is at least 30% lighter in Wh per answer and no slower at p95, <strong>keep</strong> otherwise, <strong>indicative</strong> under {{ h.threshold }} decisive votes. Promotion writes the model into the tier settings and is logged in the routing tier history.</p>
 
-  <h2>Win rate by context</h2>
+  {% if h.manual.comparisons %}
+  <h2>Second opinions</h2>
   <table>
-    <thead><tr><th>Challenger</th><th>Context</th><th>Votes</th><th>Win rate</th><th>95% interval</th></tr></thead>
+    <thead><tr><th>Challenger</th><th>Comparisons</th><th>Decisive votes</th><th>Win rate</th><th>95% interval</th></tr></thead>
     <tbody>
-      {% for row in results.by_context %}
+      {% for row in results.challengers %}{% if row.manual.comparisons %}
+      <tr>
+        <td>{{ row.model_hrid }}</td>
+        <td>{{ row.manual.comparisons }}</td>
+        <td>{{ row.manual.votes }}</td>
+        <td>{% if row.manual.win_rate is not None %}{% widthratio row.manual.win_rate 1 100 %}%{% else %}–{% endif %}</td>
+        <td>{% if row.manual.ci_low is not None %}{% widthratio row.manual.ci_low 1 100 %}% – {% widthratio row.manual.ci_high 1 100 %}%{% else %}–{% endif %}</td>
+      </tr>
+      {% endif %}{% endfor %}
+    </tbody>
+  </table>
+  <p class="arena-note">Second opinions are comparisons users asked for with the second-opinion button. The user chose to run that model, which is not the sampled population: they are never mixed into the scoreboard above nor into the verdict.</p>
+  {% endif %}
+
+  {% if results.controls %}
+  <h2>Control challenger (classifier threshold, router spec 5.4)</h2>
+  <table>
+    <thead><tr><th>Model</th><th>Decisive votes</th><th>Win rate</th><th>95% interval</th><th>Comparisons</th></tr></thead>
+    <tbody>
+      {% for row in results.controls %}
+      <tr class="{% if row.indicative %}arena-indicative{% endif %}">
+        <td>{{ row.model_hrid }}</td>
+        <td>{{ row.votes }}</td>
+        <td>{% if row.win_rate is not None %}{% widthratio row.win_rate 1 100 %}%{% else %}–{% endif %}</td>
+        <td>{% if row.ci_low is not None %}{% widthratio row.ci_low 1 100 %}% – {% widthratio row.ci_high 1 100 %}%{% else %}–{% endif %}</td>
+        <td>{{ row.comparisons }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="arena-note">The control challenger is out of tier on purpose: it measures whether the classifier is too conservative. It never enters the scoreboard nor the promotion verdict.</p>
+  {% endif %}
+
+  {% for table in tag_tables %}
+  <h2>Win rate by {{ table.label }}</h2>
+  <table>
+    <thead><tr><th>Challenger</th><th>{{ table.label|capfirst }}</th><th>Votes</th><th>Win rate</th><th>95% interval</th></tr></thead>
+    <tbody>
+      {% for row in table.rows %}
       <tr class="{% if row.indicative %}arena-indicative{% endif %}">
         <td>{{ row.model_hrid }}</td>
         <td>{{ row.tag }}</td>
@@ -144,6 +182,7 @@
       {% endfor %}
     </tbody>
   </table>
+  {% endfor %}
 
   <h2>Position check</h2>
   {% with p=results.position %}

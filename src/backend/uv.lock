@@ -12,7 +12,7 @@ required-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-09-09T14:38:10.745639767Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -543,6 +543,7 @@ dependencies = [
     { name = "djangorestframework" },
     { name = "dockerflow" },
     { name = "drf-spectacular" },
+    { name = "ecologits" },
     { name = "factory-boy" },
     { name = "gunicorn" },
     { name = "httpx" },
@@ -623,6 +624,7 @@ requires-dist = [
     { name = "dockerflow", specifier = "==2026.3.4" },
     { name = "drf-spectacular", specifier = "==0.29.0" },
     { name = "drf-spectacular-sidecar", marker = "extra == 'dev'", specifier = "==2026.6.1" },
+    { name = "ecologits", specifier = "==0.11.1" },
     { name = "factory-boy", specifier = "==3.3.3" },
     { name = "freezegun", marker = "extra == 'dev'", specifier = "==1.5.5" },
     { name = "gunicorn", specifier = "==26.0.0" },
@@ -1071,6 +1073,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7f/d8/735b129e7d55c4f6c682ecedfcc0438816e1d859e5e1837f914ac4544f6d/drf_spectacular_sidecar-2026.6.1.tar.gz", hash = "sha256:e159874fa85ccee39b801e260f2a3585fbe36a0c79bf811824eef9010ab98ea9", size = 2589761, upload-time = "2026-06-01T16:45:30.851Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4f/46/10bcaf965edcb70e7647e62b88b9e0de266f8bea7a7a3224e8f977f77eab/drf_spectacular_sidecar-2026.6.1-py3-none-any.whl", hash = "sha256:4560572773c7e5f636d36cd2903204e2c59560af0548da254e311f94458c51a2", size = 2613235, upload-time = "2026-06-01T16:45:29.031Z" },
+]
+
+[[package]]
+name = "ecologits"
+version = "0.11.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pydantic" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4b/4c/a7850b2dca7f148599aa4c55c049fc54244edff69b190b1d0c7a9e97ec8c/ecologits-0.11.1.tar.gz", hash = "sha256:d24df5c0202bd5925376143f5b78d7273cb015d17323e660723e07e6fad223c0", size = 1082759, upload-time = "2026-07-07T17:30:18.57Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/26/a84f8507ece76bf8beba850b5dd634dcf8446b5a95125c83ece205c8cc01/ecologits-0.11.1-py3-none-any.whl", hash = "sha256:a5d6b64f62a15a7c637b7cd195e1709f872e729bef020c2b64005a1a999973f2", size = 57085, upload-time = "2026-07-07T17:30:17.268Z" },
 ]
 
 [[package]]
@@ -2249,7 +2265,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
@@ -3123,8 +3139,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography" },
-    { name = "jeepney" },
+    { name = "cryptography", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "jeepney", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [

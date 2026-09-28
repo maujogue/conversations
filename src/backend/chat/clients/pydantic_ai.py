@@ -170,6 +170,7 @@ from chat.clients.schema import (
     ImagePostRunActions,
     PreparedHistory,
     StreamingState,
+    TurnMetrics,
 )
 from chat.constants import (
     ACCESS_FULL_CONTEXT,
@@ -186,9 +187,11 @@ from chat.document_context_builder import (
     render_listing,
 )
 from chat.enums import CollectionIndexState
+from chat.footprint import reasoning_tokens_from_details, resolve_co2
 from chat.llm_configuration import get_model_configuration
 from chat.mcp_servers import get_mcp_servers
 from chat.rate_limiting import record_and_compute_cooldown
+from chat.router.labels import RoutingDecision
 from chat.tasks import parse_and_store_conversation_document_task, summarize_conversation_history
 from chat.tools.descriptions import (
     DOCUMENT_SUMMARIZE_PROJECT_TOOL_DESCRIPTION,
@@ -306,6 +309,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         language=None,
         arena_comparison=None,
         arena_role=None,
+        routing_decision: RoutingDecision | None = None,
     ):
         """
         Initialize the AI agent service.
@@ -317,10 +321,16 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                 comparison: answers and metrics are recorded transactionally for the
                 given ``arena_role`` (``champion`` or ``challenger``). The champion
                 commits immediately; a vote can replace it with the challenger.
+            routing_decision: The router's decision for this turn (tier, model,
+                reasoning effort and labels). When set, the effort is applied to
+                the run, the labels are sent as Langfuse tags and recorded on the
+                assistant message, and a ``routing`` data part tells the client.
         """
         self.conversation = conversation
         self._arena_comparison = arena_comparison
         self._arena_role = arena_role
+        self._routing_decision = routing_decision
+        self._turn_metrics = TurnMetrics()
         self._arena_started_at: float | None = None
         self._arena_first_token_at: float | None = None
         self.user = user  # authenticated user only
@@ -477,7 +487,13 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             payload=payload,
             prompt_tokens=int(usage["promptTokens"]) if usage else None,
             completion_tokens=int(usage["completionTokens"]) if usage else None,
+            # ``co2_impact`` is the resolved figure (chat.footprint.resolve_co2); its
+            # source and the reasoning it accounts for are stored next to it so a
+            # comparison can be read without guessing how each figure was obtained.
             co2_impact=float(usage["co2_impact"]) if usage else None,
+            co2_source=self._turn_metrics.co2_source or "",
+            reasoning_tokens=int(self._turn_metrics.reasoning_tokens),
+            reasoning_effort=self._applied_reasoning_effort(),
             latency_ms=latency_ms,
             first_token_ms=first_token_ms,
             trace_id=trace_id,
@@ -569,6 +585,119 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             return str(uuid.uuid4())
         return f"trace-{trace_id}"
 
+    # --------------------------------------------------------------------- #
+    # Routing decision plumbing (docs/llm-router-spec.md sections 3.2, 5.5, 7.1)
+    # --------------------------------------------------------------------- #
+
+    def _routing_trace_tags(self) -> list[str]:
+        """Langfuse trace tags carrying the routing labels (spec 2, "tags are stored")."""
+        decision = self._routing_decision
+        if decision is None:
+            return []
+        tags = [
+            f"tier:{decision.tier.value}",
+            f"tier_source:{decision.tier_source.value}",
+            f"routed:{decision.reason.value}",
+        ]
+        if decision.labels is not None:
+            tags += [f"domain:{decision.labels.domain.value}", f"task:{decision.labels.task.value}"]
+        return tags
+
+    def _routing_trace_metadata(self) -> dict[str, str]:
+        """Langfuse trace metadata for the routing decision (string values, <= 200 chars)."""
+        decision = self._routing_decision
+        if decision is None:
+            return {}
+        values = {
+            "tier": decision.tier.value,
+            "tier_source": decision.tier_source.value,
+            "domain": decision.labels.domain.value if decision.labels else "",
+            "task": decision.labels.task.value if decision.labels else "",
+            "router_reason": decision.reason.value,
+            "router_confidence": (
+                f"{decision.router_confidence:.2f}"
+                if decision.router_confidence is not None
+                else ""
+            ),
+        }
+        return {key: str(value)[:200] for key, value in values.items() if value != ""}
+
+    def _arena_trace_tags(self) -> list[str]:
+        """Langfuse trace tags of an arena side, so a vote can be sliced per model.
+
+        The ``arena_preference`` score is written on the trace (``chat/arena_scores.py``);
+        without these tags a Langfuse reader only gets the global won/lost distribution
+        and cannot tell which challenger earned it. ``model`` is the side's own HRID,
+        which is the row key of the admin scoreboard.
+        """
+        comparison = self._arena_comparison
+        if comparison is None or not self._arena_role:
+            return []
+        return [
+            f"arena:{self._arena_role}",
+            f"arena_experiment:{comparison.experiment_id}",
+            f"arena_origin:{comparison.origin}",
+            f"model:{self.model_hrid}",
+        ]
+
+    def _arena_trace_metadata(self) -> dict[str, str]:
+        """The same arena labels as metadata, for ad-hoc filtering in the Langfuse UI."""
+        comparison = self._arena_comparison
+        if comparison is None or not self._arena_role:
+            return {}
+        return {
+            "arena": str(self._arena_role),
+            "arena_experiment": str(comparison.experiment_id),
+            "arena_origin": str(comparison.origin),
+            "model": self.model_hrid,
+        }
+
+    def _routing_data_part(self) -> dict | None:
+        """The transient ``routing`` data part announcing the decision before the first token."""
+        decision = self._routing_decision
+        if decision is None:
+            return None
+        return {
+            "type": "routing",
+            "tier": decision.tier.value,
+            "tier_label": f"router.tier.{decision.tier.value}",
+            "tier_source": decision.tier_source.value,
+            "changed": decision.changed,
+            "reasoning": self.model_configuration.reasoning_control != "none",
+        }
+
+    def _routing_metadata(self) -> dict:
+        """Routing keys persisted on the assistant message and streamed as annotation."""
+        if self._routing_decision is None:
+            return {}
+        return {**self._routing_decision.metadata(), **self._turn_metrics.as_metadata()}
+
+    def _applied_reasoning_effort(self) -> str:
+        """Effort this run actually asks the model for, "" when the model has no levels.
+
+        Arena candidates take the effort frozen on the comparison (the experiment's
+        override, else the router's per-turn effort), so both sides run at the same
+        one whatever the side's own routing (router spec 8.1).
+        """
+        if self.model_configuration.reasoning_control != "levels":
+            return ""
+        if self._arena_comparison is not None:
+            return (self._arena_comparison.input_snapshot or {}).get("reasoning_effort") or ""
+        decision = self._routing_decision
+        if decision is None or decision.reasoning_effort is None:
+            return ""
+        return decision.reasoning_effort.value
+
+    def _model_settings_override(self):
+        """Per-turn model settings: the routed reasoning effort, on models with levels."""
+        effort = self._applied_reasoning_effort()
+        if not effort:
+            return None
+        # Lazy import, like chat/agents/base.py: the openai extra is optional.
+        from pydantic_ai.models.openai import OpenAIChatModelSettings  # noqa: PLC0415
+
+        return OpenAIChatModelSettings(openai_reasoning_effort=effort)
+
     async def _stream_content(  # noqa: PLR0912  # pylint: disable=too-many-branches
         self, messages: List[UIMessage], force_web_search: bool = False
     ):
@@ -583,8 +712,18 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                         user_id=str(self.user.sub),
                         session_id=str(self.conversation.pk),
                         metadata={
-                            "user_fqdn": self.user.email.split("@")[-1],
+                            # Accounts created without an email (device users,
+                            # some OIDC providers) have none: a missing domain
+                            # must not break the answer.
+                            **(
+                                {"user_fqdn": self.user.email.split("@")[-1]}
+                                if self.user.email
+                                else {}
+                            ),
+                            **self._routing_trace_metadata(),
+                            **self._arena_trace_metadata(),
                         },
+                        tags=(self._routing_trace_tags() + self._arena_trace_tags()) or None,
                     )
                 )
                 self._langfuse_span = stack.enter_context(
@@ -686,6 +825,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         """
         self._last_stop_check = 0
         self._pre_stream_events = []
+        self._turn_metrics = TurnMetrics()
         await cache.adelete(self._stop_cache_key)
 
     # --------------------------------------------------------------------- #
@@ -1576,6 +1716,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                 await self._agent_stop_streaming()
                 if isinstance(event, PartStartEvent):
                     if isinstance(event.part, TextPart):
+                        state.note_text(time.monotonic())
                         yield events_v4.TextPart(text=event.part.content)
                     elif isinstance(event.part, ToolCallPart):
                         yield events_v4.ToolCallStreamingStartPart(
@@ -1583,9 +1724,11 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                             tool_name=event.part.tool_name,
                         )
                     elif isinstance(event.part, ThinkingPart):
+                        state.note_thinking(time.monotonic())
                         yield events_v4.ReasoningPart(reasoning=event.part.content)
                 elif isinstance(event, PartDeltaEvent):
                     if isinstance(event.delta, TextPartDelta):
+                        state.note_text(time.monotonic())
                         yield events_v4.TextPart(text=event.delta.content_delta)
                     elif isinstance(event.delta, ToolCallPartDelta):
                         state.tool_is_streaming = True
@@ -1594,6 +1737,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                             args_text_delta=event.delta.args_delta,
                         )
                     elif isinstance(event.delta, ThinkingPartDelta):
+                        state.note_thinking(time.monotonic())
                         yield events_v4.ReasoningPart(reasoning=event.delta.content_delta)
 
     async def _handle_model_request_node(
@@ -1716,7 +1860,13 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         # too): that is the real inference load the cooldown should reflect.
         # Captured before _prepare_update_conversation folds it into the
         # conversation's cumulative total.
-        request_tokens = int(usage["promptTokens"]) + int(usage["completionTokens"])
+        # Reasoning tokens are excluded from the provider's completion count but are
+        # real inference load, so they count for the cooldown too (spec 10).
+        request_tokens = (
+            int(usage["promptTokens"])
+            + int(usage["completionTokens"])
+            + int(self._turn_metrics.reasoning_tokens)
+        )
 
         # Per-message CO2 impact, captured before _prepare_update_conversation
         # folds the conversation's cumulative total into usage["co2_impact"].
@@ -1759,8 +1909,11 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         # Stream the CO2 annotation _prepare_update_conversation persists, so the
         # live message carries it like a reload does. Only that key is stored:
         # the usage in the finish frame below is streamed but never persisted.
+        annotations = {**self._routing_metadata()}
         if message_co2_impact:
-            yield events_v4.MessageAnnotationPart(annotations=[{"co2_impact": message_co2_impact}])
+            annotations["co2_impact"] = message_co2_impact
+        if annotations:
+            yield events_v4.MessageAnnotationPart(annotations=[annotations])
         # Vercel finish message
         yield events_v4.FinishMessagePart(
             finish_reason=events_v4.FinishReason.STOP,
@@ -1771,7 +1924,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             ),
         )
 
-    async def _run_agent(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements  # noqa: PLR0912
+    async def _run_agent(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements  # noqa: PLR0912, PLR0915
         self,
         messages: List[UIMessage],
         force_web_search: bool = False,
@@ -1793,6 +1946,11 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         for pre_event in self._pre_stream_events:
             yield events_v4.DataPart(data=[pre_event])
         self._pre_stream_events = []
+
+        # The routing decision is announced before the first token so the caption
+        # replaces the "Choix du modèle…" shimmer as soon as it is known (spec 7.1).
+        if (routing_part := self._routing_data_part()) is not None:
+            yield events_v4.DataPart(data=[routing_part])
 
         # Re-index (or report busy) when the conversation has READY attachments and
         # its index is not current. INDEXING is included: reindex_conversation handles
@@ -1877,6 +2035,8 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                 message_history=message_history,
                 deps=self._context_deps,
                 toolsets=mcp_servers,
+                # Per-turn reasoning effort chosen by the router (spec 3.2).
+                model_settings=self._model_settings_override(),
             ) as run:
                 state = StreamingState()
                 async for event in self._process_agent_nodes(run, state):
@@ -1888,12 +2048,36 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                 final_usage = run.usage
                 usage["promptTokens"] = final_usage.input_tokens
                 usage["completionTokens"] = final_usage.output_tokens
-                usage["co2_impact"] = _extract_co2_from_usage(final_usage)
+                usage["co2_impact"] = self._resolve_turn_footprint(final_usage, state)
 
         async for event in self._finalize_conversation(
             new_messages, run_output, usage, state, image_actions
         ):
             yield event
+
+    def _resolve_turn_footprint(self, final_usage: RunUsage, state: StreamingState) -> float:
+        """Settle the turn's CO2 figure and reasoning metrics (spec 10).
+
+        The provider's figure is computed from ``completion_tokens``, which excludes
+        reasoning tokens, so reasoning answers get an EcoLogits estimate instead.
+        """
+        now = time.monotonic()
+        latency_s = now - self._arena_started_at if self._arena_started_at is not None else None
+        reasoning_tokens = reasoning_tokens_from_details(final_usage.details)
+        provider_co2 = _extract_co2_from_usage(final_usage) or None
+        co2_impact, co2_source = resolve_co2(
+            self.model_configuration,
+            provider_co2,
+            int(final_usage.output_tokens or 0),
+            reasoning_tokens,
+            latency_s,
+        )
+        self._turn_metrics = TurnMetrics(
+            reasoning_tokens=reasoning_tokens,
+            reasoning_seconds=state.reasoning_seconds(now),
+            co2_source=co2_source,
+        )
+        return co2_impact or 0
 
     @staticmethod
     def _apply_image_actions(
@@ -1990,10 +2174,13 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             logger.warning("model_response_message_id is None")
 
         co2_impact = usage["co2_impact"]
+        message_metadata = {**self._routing_metadata()}
         if co2_impact:
+            message_metadata["co2_impact"] = co2_impact
+        if message_metadata:
             _output_ui_message.metadata = {
                 **(_output_ui_message.metadata or {}),
-                "co2_impact": co2_impact,
+                **message_metadata,
             }
 
         final_output_json = json.loads(

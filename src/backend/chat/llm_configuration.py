@@ -151,6 +151,21 @@ class LLModel(BaseModel):
     # the threshold). Smaller for models with more GPUs allocated. Falls back to
     # the ChatCooldownSettings default_factor when unset. See chat/rate_limiting.py.
     cooldown_factor: float | None = None
+    # Role of the model in the application: "chat" models are offered to users
+    # (selector, router tiers, arena), "utility" models run background jobs such
+    # as summarization and are never proposed as a conversation model.
+    role: Literal["chat", "utility"] = "chat"
+    # Euro prices per million tokens, for providers that bill (Albert bills zero).
+    input_price_eur_per_mtok: float | None = None
+    output_price_eur_per_mtok: float | None = None
+    # Parameter counts in billions, used by the EcoLogits footprint estimate
+    # (chat/footprint.py). For dense models active == total; when only
+    # total_params_b is given, active_params_b defaults to it.
+    total_params_b: float | None = None
+    active_params_b: float | None = None
+    # How the model exposes reasoning: "levels" (gpt-oss: low/medium/high
+    # reasoning_effort), "toggle" (deepseek: on/off only) or "none".
+    reasoning_control: Literal["none", "levels", "toggle"] = "none"
 
     @field_validator("tools", mode="before")
     @classmethod
@@ -215,6 +230,21 @@ class LLModel(BaseModel):
                 "Either 'provider_name' or 'provider' must be set, "
                 "unless model_name starts with '<provider>:'."
             )
+        return self
+
+    @model_validator(mode="after")
+    def fill_active_params(self) -> Self:
+        """Default active_params_b to total_params_b (dense model) when only total is set."""
+        if self.active_params_b is None and self.total_params_b is not None:
+            self.active_params_b = self.total_params_b
+        if self.active_params_b is not None and self.total_params_b is None:
+            raise ValueError("total_params_b is required when active_params_b is set.")
+        if (
+            self.active_params_b is not None
+            and self.total_params_b is not None
+            and self.active_params_b > self.total_params_b
+        ):
+            raise ValueError("active_params_b cannot exceed total_params_b.")
         return self
 
     @property
