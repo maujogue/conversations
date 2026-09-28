@@ -443,6 +443,102 @@
         ],
         "chartType": "BAR_TIME_SERIES"
       }
+    },
+    {
+      "placement": {
+        "id": "arena-votes-challenger",
+        "x": 0,
+        "y": 23,
+        "width": 6,
+        "height": 6
+      },
+      "widget": {
+        "name": "Router · Arena votes: challenger side",
+        "description": "Outcome distribution of the `challenger` side of every closed comparison: `won`, `lost`, `tie`, `both_bad`, `abandoned`. Replaces the per-row draw columns of the Django scoreboard. Add a `tags any of [\"model:<hrid>\"]` or `tags any of [\"arena_experiment:<uuid>\"]` filter to narrow it to one challenger or one experiment. `traceName is not null` forces the trace join, without which Langfuse v4 counts each trace-level score once per observation.",
+        "view": "scores-categorical",
+        "dimensions": [
+          {
+            "field": "stringValue"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "name",
+            "operator": "=",
+            "value": "arena_preference",
+            "type": "string"
+          },
+          {
+            "column": "traceName",
+            "operator": "is not null",
+            "value": "",
+            "type": "null"
+          },
+          {
+            "column": "tags",
+            "operator": "any of",
+            "value": [
+              "arena:challenger"
+            ],
+            "type": "arrayOptions"
+          }
+        ],
+        "chartType": "PIVOT_TABLE"
+      }
+    },
+    {
+      "placement": {
+        "id": "arena-votes-champion",
+        "x": 6,
+        "y": 23,
+        "width": 6,
+        "height": 6
+      },
+      "widget": {
+        "name": "Router · Arena votes: champion side",
+        "description": "Outcome distribution of the `champion` side of every closed comparison: `won`, `lost`, `tie`, `both_bad`, `abandoned`. Replaces the per-row draw columns of the Django scoreboard. Add a `tags any of [\"model:<hrid>\"]` or `tags any of [\"arena_experiment:<uuid>\"]` filter to narrow it to one challenger or one experiment. `traceName is not null` forces the trace join, without which Langfuse v4 counts each trace-level score once per observation.",
+        "view": "scores-categorical",
+        "dimensions": [
+          {
+            "field": "stringValue"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "name",
+            "operator": "=",
+            "value": "arena_preference",
+            "type": "string"
+          },
+          {
+            "column": "traceName",
+            "operator": "is not null",
+            "value": "",
+            "type": "null"
+          },
+          {
+            "column": "tags",
+            "operator": "any of",
+            "value": [
+              "arena:champion"
+            ],
+            "type": "arrayOptions"
+          }
+        ],
+        "chartType": "PIVOT_TABLE"
+      }
     }
   ]
 }

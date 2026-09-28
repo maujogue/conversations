@@ -1,0 +1,388 @@
+{
+  "name": "Router · Production",
+  "description": "Adequate intelligence for the user, savings for the state. One modelled month: 100,000 users, ~1,000,000 turns, 100,000 arena draws, 5,000 human choices. Environments: `production` (as routed), `production-baseline` (the same turns on mistral-medium-3-5 alone) and `production-arena` (the arena's extra challenger answers, kept out of the routed total). Figures are modelled, not measured - see docs/langfuse/README.md before quoting any of them.",
+  "filters": [],
+  "widgets": [
+    {
+      "placement": {
+        "id": "prod-turns",
+        "x": 0,
+        "y": 0,
+        "width": 3,
+        "height": 4
+      },
+      "widget": {
+        "name": "Production · Turns served",
+        "description": "Answers served over the period, one per turn. About 1,000,000 a month from 100,000 users.",
+        "view": "observations",
+        "dimensions": [],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "environment",
+            "operator": "any of",
+            "value": [
+              "production"
+            ],
+            "type": "stringOptions"
+          },
+          {
+            "column": "name",
+            "operator": "any of",
+            "value": [
+              "answer-simple",
+              "answer-standard",
+              "answer-complex"
+            ],
+            "type": "stringOptions"
+          }
+        ],
+        "chartType": "NUMBER"
+      }
+    },
+    {
+      "placement": {
+        "id": "prod-votes",
+        "x": 3,
+        "y": 0,
+        "width": 3,
+        "height": 4
+      },
+      "widget": {
+        "name": "Production · Human choices",
+        "description": "Arena comparisons a human actually voted on: one `won` score per comparison, so this counts choices and not the two scores each one writes. About 5,000 a month. Distinct users are on Langfuse's own Users page - the widget API has no verified distinct-count aggregation.",
+        "view": "scores-categorical",
+        "dimensions": [],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "name",
+            "operator": "=",
+            "value": "arena_preference",
+            "type": "string"
+          },
+          {
+            "column": "stringValue",
+            "operator": "=",
+            "value": "won",
+            "type": "string"
+          }
+        ],
+        "chartType": "NUMBER"
+      }
+    },
+    {
+      "placement": {
+        "id": "prod-routed",
+        "x": 6,
+        "y": 0,
+        "width": 3,
+        "height": 4
+      },
+      "widget": {
+        "name": "Production · Routed cost (EUR)",
+        "description": "What the router actually spent, classifier included. Euros at the configured prices; Langfuse labels cost columns with a dollar sign whatever the unit.",
+        "view": "observations",
+        "dimensions": [],
+        "metrics": [
+          {
+            "measure": "totalCost",
+            "agg": "sum"
+          }
+        ],
+        "filters": [
+          {
+            "column": "environment",
+            "operator": "any of",
+            "value": [
+              "production"
+            ],
+            "type": "stringOptions"
+          }
+        ],
+        "chartType": "NUMBER"
+      }
+    },
+    {
+      "placement": {
+        "id": "prod-baseline",
+        "x": 9,
+        "y": 0,
+        "width": 3,
+        "height": 4
+      },
+      "widget": {
+        "name": "Production · Same turns on one premium model (EUR)",
+        "description": "The counterfactual: identical turns, identical token counts, served by mistral-medium-3-5 alone - what an unrouted deployment picking one model safe for the hardest turn would have paid.",
+        "view": "observations",
+        "dimensions": [],
+        "metrics": [
+          {
+            "measure": "totalCost",
+            "agg": "sum"
+          }
+        ],
+        "filters": [
+          {
+            "column": "environment",
+            "operator": "any of",
+            "value": [
+              "production-baseline"
+            ],
+            "type": "stringOptions"
+          }
+        ],
+        "chartType": "NUMBER"
+      }
+    },
+    {
+      "placement": {
+        "id": "prod-savings",
+        "x": 0,
+        "y": 4,
+        "width": 12,
+        "height": 5
+      },
+      "widget": {
+        "name": "Production · The saving: router vs one premium model (EUR)",
+        "description": "Same turns, same tokens, two prices. `production` is what the router spent; `production-baseline` is the single-model counterfactual. The gap is the claim.",
+        "view": "observations",
+        "dimensions": [
+          {
+            "field": "environment"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "totalCost",
+            "agg": "sum"
+          }
+        ],
+        "filters": [
+          {
+            "column": "environment",
+            "operator": "any of",
+            "value": [
+              "production",
+              "production-baseline"
+            ],
+            "type": "stringOptions"
+          }
+        ],
+        "chartType": "VERTICAL_BAR"
+      }
+    },
+    {
+      "placement": {
+        "id": "prod-savings-time",
+        "x": 0,
+        "y": 9,
+        "width": 12,
+        "height": 5
+      },
+      "widget": {
+        "name": "Production · Cost over time: router vs one premium model (EUR)",
+        "description": "The same comparison per time bucket, so the saving reads as a sustained gap rather than one total.",
+        "view": "observations",
+        "dimensions": [
+          {
+            "field": "environment"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "totalCost",
+            "agg": "sum"
+          }
+        ],
+        "filters": [
+          {
+            "column": "environment",
+            "operator": "any of",
+            "value": [
+              "production",
+              "production-baseline"
+            ],
+            "type": "stringOptions"
+          }
+        ],
+        "chartType": "BAR_TIME_SERIES"
+      }
+    },
+    {
+      "placement": {
+        "id": "prod-tier-share",
+        "x": 0,
+        "y": 14,
+        "width": 6,
+        "height": 6
+      },
+      "widget": {
+        "name": "Production · Where the turns go (tier share)",
+        "description": "Share of turns the router sent to each tier: simple, standard, complex. The answer generation is named after its tier, because Langfuse groups by the whole tag array and so cannot group by a single tag.",
+        "view": "observations",
+        "dimensions": [
+          {
+            "field": "name"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "environment",
+            "operator": "any of",
+            "value": [
+              "production"
+            ],
+            "type": "stringOptions"
+          },
+          {
+            "column": "name",
+            "operator": "any of",
+            "value": [
+              "answer-simple",
+              "answer-standard",
+              "answer-complex"
+            ],
+            "type": "stringOptions"
+          }
+        ],
+        "chartType": "PIE"
+      }
+    },
+    {
+      "placement": {
+        "id": "prod-tier-cost",
+        "x": 6,
+        "y": 14,
+        "width": 6,
+        "height": 6
+      },
+      "widget": {
+        "name": "Production · Where the money goes (cost per tier, EUR)",
+        "description": "The same three slices weighted by euro cost. Read it against the tier-share pie: the complex tier is about a tenth of the turns and nearly a third of the answer cost.",
+        "view": "observations",
+        "dimensions": [
+          {
+            "field": "name"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "totalCost",
+            "agg": "sum"
+          }
+        ],
+        "filters": [
+          {
+            "column": "environment",
+            "operator": "any of",
+            "value": [
+              "production"
+            ],
+            "type": "stringOptions"
+          },
+          {
+            "column": "name",
+            "operator": "any of",
+            "value": [
+              "answer-simple",
+              "answer-standard",
+              "answer-complex"
+            ],
+            "type": "stringOptions"
+          }
+        ],
+        "chartType": "PIE"
+      }
+    },
+    {
+      "placement": {
+        "id": "prod-overhead",
+        "x": 0,
+        "y": 20,
+        "width": 6,
+        "height": 6
+      },
+      "widget": {
+        "name": "Production · What the router itself costs (EUR)",
+        "description": "Cost split between answering and deciding. `router-classifier` is the routing overhead: the spec targets under 2 percent of tokens, and this is far above it, because the classifier re-sends a ~1,300-token system prompt every turn with no provider-side caching.",
+        "view": "observations",
+        "dimensions": [
+          {
+            "field": "name"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "totalCost",
+            "agg": "sum"
+          }
+        ],
+        "filters": [
+          {
+            "column": "environment",
+            "operator": "any of",
+            "value": [
+              "production"
+            ],
+            "type": "stringOptions"
+          }
+        ],
+        "chartType": "PIE"
+      }
+    },
+    {
+      "placement": {
+        "id": "prod-leaderboard",
+        "x": 6,
+        "y": 20,
+        "width": 6,
+        "height": 6
+      },
+      "widget": {
+        "name": "Production · Leaderboard: human votes per model",
+        "description": "Categorical arena_preference scores per model. The vote is scored on the answer observation, not the trace: a trace-level score is counted once per observation, which would double-count every trace that also carries a classifier generation.",
+        "view": "scores-categorical",
+        "dimensions": [
+          {
+            "field": "observationModelName"
+          },
+          {
+            "field": "stringValue"
+          }
+        ],
+        "metrics": [
+          {
+            "measure": "count",
+            "agg": "count"
+          }
+        ],
+        "filters": [
+          {
+            "column": "name",
+            "operator": "=",
+            "value": "arena_preference",
+            "type": "string"
+          }
+        ],
+        "chartType": "PIVOT_TABLE"
+      }
+    }
+  ]
+}
