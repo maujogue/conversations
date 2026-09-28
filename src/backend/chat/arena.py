@@ -470,7 +470,7 @@ def create_manual_comparison(
 
     champion_hrid = conversation.model_hrid
     tier = _tier_of_committed_turn(conversation, champion_hrid)
-    if tier is None or _is_red(champion_hrid):
+    if not tier or _is_red(champion_hrid):
         raise ArenaConflict("arena_manual_unavailable")
     # A second opinion is a user action, not an experiment: it must work on every
     # tier, including tiers nobody is currently running an experiment on. When
