@@ -25,6 +25,7 @@ and this project adheres to
 
 ### Fixed
 
+- 🐛(back) answer users who have no email when Langfuse is enabled
 - ✅(back) make the project list query counts independent of test order
 - 👷(ci) pull the MinIO images from quay.io instead of Docker Hub
 - 🐛(ci) fix the CHANGELOG check failing when a pull request is opened
