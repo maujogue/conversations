@@ -21,6 +21,7 @@ from core.api.viewsets import Pagination, SerializerPerActionMixin
 from core.file_upload.enums import AttachmentStatus
 from core.file_upload.mixins import AttachmentMixin
 
+from chat import arena as arena_service
 from chat import models, serializers
 from chat.clients.pydantic_ai import AIAgentService
 from chat.constants import IMAGE_MIME_PREFIX, SSE_MIME_TYPE
@@ -33,6 +34,7 @@ from chat.rate_limiting import (
     get_cooldown_remaining,
 )
 from chat.serializers import ChatConversationRequestSerializer
+from chat.views.arena import ArenaMixin
 from chat.views.edit_in_docs import EditInDocsMixin
 from chat.views.filters import ProjectFilter, TitleSearchFilter
 from chat.views.helpers import _bulk_delete_s3_blobs, conditional_refresh_oidc_token
@@ -90,6 +92,7 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
     mixins.UpdateModelMixin,
     ChatAttachmentMixin,
     EditInDocsMixin,
+    ArenaMixin,
     viewsets.GenericViewSet,
 ):
     """ViewSet for managing chat conversations.
@@ -219,7 +222,7 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
         url_path="conversation",
         url_name="conversation",
     )
-    def post_conversation(self, request, pk):  # pylint: disable=unused-argument
+    def post_conversation(self, request, pk):  # pylint: disable=unused-argument,too-many-locals
         """Handle POST requests to the chat endpoint.
 
         Args:
@@ -293,39 +296,56 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
         if not messages:
             return Response({"error": "No messages provided"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Warning: the messages should be stored more securely in production
-        conversation.ui_messages = request.data.get("messages", [])
-        # `updated_at` is auto_now; Django skips auto_now fields when
-        # update_fields is set, so list it explicitly to preserve the bump.
-        update_fields = ["ui_messages", "updated_at"]
-
-        # Pin the model the first time the conversation is exercised. Existing
-        # conversations keep their pinned model so a recovered main model never
-        # moves a chat already in progress. A conditional UPDATE with
-        # model_hrid="" is the compare-and-set: only the first concurrent
-        # request can pin, late peers re-read the winner.
-        if not conversation.model_hrid:
-            resolved = resolve_effective_model_hrid(requested_model_hrid)
-            pinned = models.ChatConversation.objects.filter(
-                pk=conversation.pk, model_hrid=""
-            ).update(model_hrid=resolved)
-            if pinned:
-                conversation.model_hrid = resolved
-            else:
-                conversation.refresh_from_db(fields=["model_hrid"])
-
-        conversation.save(update_fields=update_fields)
-
-        ai_service = AIAgentService(
-            conversation=conversation,
-            user=self.request.user,
-            session=request.session,
-            model_hrid=conversation.model_hrid,
-            language=(
-                self.request.user.language
-                or self.request.LANGUAGE_CODE  # from the LocaleMiddleware
-            ),
+        # Claim inference before returning a stream, using the draw's frozen turn.
+        arena = self._resolve_arena_stream_params(
+            conversation, query_params_serializer.validated_data, messages[-1]
         )
+        if isinstance(arena, Response):
+            return arena
+
+        language = (
+            self.request.user.language or self.request.LANGUAGE_CODE  # from the LocaleMiddleware
+        )
+
+        if arena is not None:
+            messages, force_web_search, ai_service = self._arena_candidate_run(
+                conversation, arena, language
+            )
+        else:
+            # A comparison the user walked away from is closed first, keeping the
+            # production answer, so the history this turn builds on is coherent.
+            arena_service.resolve_pending(conversation)
+
+            # Warning: the messages should be stored more securely in production
+            conversation.ui_messages = request.data.get("messages", [])
+            # `updated_at` is auto_now; Django skips auto_now fields when
+            # update_fields is set, so list it explicitly to preserve the bump.
+            update_fields = ["ui_messages", "updated_at"]
+
+            # Pin the model the first time the conversation is exercised. Existing
+            # conversations keep their pinned model so a recovered main model never
+            # moves a chat already in progress. A conditional UPDATE with
+            # model_hrid="" is the compare-and-set: only the first concurrent
+            # request can pin, late peers re-read the winner.
+            if not conversation.model_hrid:
+                resolved = resolve_effective_model_hrid(requested_model_hrid)
+                pinned = models.ChatConversation.objects.filter(
+                    pk=conversation.pk, model_hrid=""
+                ).update(model_hrid=resolved)
+                if pinned:
+                    conversation.model_hrid = resolved
+                else:
+                    conversation.refresh_from_db(fields=["model_hrid"])
+
+            conversation.save(update_fields=update_fields)
+
+            ai_service = AIAgentService(
+                conversation=conversation,
+                user=self.request.user,
+                session=request.session,
+                model_hrid=conversation.model_hrid,
+                language=language,
+            )
 
         # This environment variable allows switching between sync and async streaming modes
         # based on the server configuration. Tests run in sync mode (WSGI), while
@@ -393,6 +413,8 @@ class ChatViewSet(  # pylint: disable=too-many-ancestors, abstract-method
             model_hrid=None,  # model_hrid is not needed to stop streaming
             language=None,  # language is not needed to stop streaming
         ).stop_streaming()
+        if arena_service.get_pending_comparison(conversation) is not None:
+            arena_service.resolve_pending(conversation, reason="cancelled")
 
         return Response({"status": "OK"}, status=status.HTTP_200_OK)
 

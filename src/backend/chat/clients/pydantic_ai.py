@@ -91,6 +91,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.files.storage import default_storage
+from django.db import transaction
 from django.utils.module_loading import import_string
 from django.utils.translation import gettext_lazy as _
 
@@ -129,6 +130,7 @@ from pydantic_ai.models import Model, infer_model_profile
 from core.analytics import acapture_event
 from core.feature_flags.helpers import is_feature_enabled
 
+from chat import arena as arena_service
 from chat import models
 from chat.agents.conversation import ConversationAgent, TitleGenerationAgent
 from chat.agents.history_processors import (
@@ -183,7 +185,7 @@ from chat.document_context_builder import (
     build_documents_listing,
     render_listing,
 )
-from chat.enums import CollectionIndexState
+from chat.enums import ArenaRole, CollectionIndexState
 from chat.llm_configuration import get_model_configuration
 from chat.mcp_servers import DataGouvConnector, enter_mcp_toolsets
 from chat.rate_limiting import record_and_compute_cooldown
@@ -201,7 +203,10 @@ from chat.tools.document_generic_search_rag import add_document_rag_search_tool_
 from chat.tools.document_search_rag import add_document_rag_search_tool
 from chat.tools.document_summarize import document_summarize, document_summarize_project
 from chat.tools.generate_presentation import generate_presentation
-from chat.tools.self_documentation import build_self_documentation_payload
+from chat.tools.self_documentation import (
+    anonymize_arena_documentation,
+    build_self_documentation_payload,
+)
 from chat.vercel_ai_sdk.core import events_v4, events_v5
 from chat.vercel_ai_sdk.encoder import CURRENT_EVENT_ENCODER_VERSION, EventEncoder
 from chat.vercel_ai_sdk.encoder.encoder import DONE_FRAME
@@ -309,13 +314,15 @@ def _extract_co2_from_usage(usage: RunUsage) -> float:
 class AIAgentService:  # pylint: disable=too-many-instance-attributes
     """Service class for AI-related operations (Pydantic-AI edition)."""
 
-    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def __init__(  # noqa: PLR0913  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         conversation: models.ChatConversation,
         user,
         session=None,
         model_hrid=None,
         language=None,
+        arena_comparison=None,
+        arena_role=None,
     ):
         """
         Initialize the AI agent service.
@@ -323,8 +330,16 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         Args:
             conversation: The chat conversation instance
             user: The authenticated user instance, only used for dynamic feature flags
+            arena_comparison: When set, this run is one candidate of a blind arena
+                comparison: answers and metrics are recorded transactionally for the
+                given ``arena_role`` (``champion`` or ``challenger``). The champion
+                commits immediately; a vote can replace it with the challenger.
         """
         self.conversation = conversation
+        self._arena_comparison = arena_comparison
+        self._arena_role = arena_role
+        self._arena_started_at: float | None = None
+        self._arena_first_token_at: float | None = None
         self.user = user  # authenticated user only
         self.model_hrid = model_hrid or settings.LLM_DEFAULT_MODEL_HRID  # HRID of the model to use
         self.model_configuration = get_model_configuration(self.model_hrid)
@@ -420,7 +435,13 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
 
     @property
     def _stop_cache_key(self):
-        """Cache key holding the stop signal for this conversation's stream."""
+        """Cache key holding the stop signal for this conversation's stream.
+
+        Each arena candidate has its own key: the first candidate to see a shared
+        stop signal would delete it and the other one would keep streaming.
+        """
+        if self._arena_role:
+            return f"streaming:stop:{self.conversation.pk}:{self._arena_role}"
         return f"streaming:stop:{self.conversation.pk}"
 
     # --------------------------------------------------------------------- #
@@ -445,11 +466,67 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         This method is a placeholder for stopping the streaming operation.
         """
         logger.info("Stopping streaming for conversation %s", self.conversation.id)
-        cache.set(self._stop_cache_key, "1", timeout=CACHE_TIMEOUT)
+        base_key = f"streaming:stop:{self.conversation.pk}"
+        cache.set_many(
+            {base_key: "1", **{f"{base_key}:{role}": "1" for role in ArenaRole}},
+            timeout=CACHE_TIMEOUT,
+        )
 
     # --------------------------------------------------------------------- #
     # Async internals
     # --------------------------------------------------------------------- #
+
+    async def _on_llm_error(self, messages: List[UIMessage], error_code: str) -> None:
+        """Keep the user bubble on a normal turn; record the failure on an arena candidate.
+
+        Arena failures only update the comparison, under its transaction and version
+        guard. They must not write a user bubble through a stale conversation object.
+        """
+        if self._arena_comparison is not None:
+            await sync_to_async(self._arena_record)(error=error_code)
+            return
+        if messages:
+            await self._persist_user_message_on_error(messages[-1])
+
+    async def _on_arena_unexpected_error(self) -> None:
+        """Close an arena candidate's side when its run fails in an unexpected way.
+
+        The error still propagates and ends the stream; without this, the side would
+        never finish and the comparison would wait for an answer that never comes.
+        """
+        if self._arena_comparison is not None:
+            await sync_to_async(self._arena_record)(error="unexpected_error")
+
+    def _arena_record(
+        self,
+        *,
+        payload: dict | None = None,
+        usage: Dict[str, Union[int, float]] | None = None,
+        error: str = "",
+    ) -> None:
+        """Store this candidate's answer (or failure) and timings on the arena comparison."""
+        started = self._arena_started_at
+        now = time.monotonic()
+        latency_ms = int((now - started) * 1000) if started is not None else None
+        first_token_ms = (
+            int((self._arena_first_token_at - started) * 1000)
+            if started is not None and self._arena_first_token_at is not None
+            else None
+        )
+        message_id = self._model_response_message_id or ""
+        trace_id = message_id[len("trace-") :] if message_id.startswith("trace-") else ""
+        arena_service.record_side_result(
+            self._arena_comparison,
+            self._arena_role,
+            payload=payload,
+            prompt_tokens=int(usage["promptTokens"]) if usage else None,
+            completion_tokens=int(usage["completionTokens"]) if usage else None,
+            co2_impact=float(usage["co2_impact"]) if usage else None,
+            latency_ms=latency_ms,
+            first_token_ms=first_token_ms,
+            trace_id=trace_id,
+            error=error,
+        )
 
     async def _persist_user_message_on_error(self, user_message: UIMessage) -> None:
         """Persist the user message when an LLM error prevents normal finalization.
@@ -491,6 +568,10 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         here (with markers already stamped), the rebuild step short-circuits via
         the "last message is user" guard and the marked version stands.
         """
+        if self._arena_comparison is not None:
+            # A candidate must not touch the conversation; the rebuilt bubble is
+            # committed with the winner instead.
+            return
         if self.conversation.messages and self.conversation.messages[-1].role == "user":
             return
         self.conversation.messages = list(self.conversation.messages) + [user_message]
@@ -539,6 +620,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
     ):
         """Stream the agent run as a Vercel AI SDK UI message stream."""
         await self._clean()
+        self._arena_started_at = time.monotonic()
         translator = V4ToV5Translator()
         with ExitStack() as stack:
             if self._langfuse_available:
@@ -563,12 +645,17 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             try:
                 async for event in self._run_agent(messages, force_web_search, force_datagouv):
                     for translated in translator.translate(event):
+                        if self._arena_first_token_at is None and isinstance(
+                            translated, events_v5.TextDeltaEvent
+                        ):
+                            self._arena_first_token_at = time.monotonic()
                         yield self.event_encoder.encode(translated)
             except (ModelHTTPError, HTTPValidationError, SDKError) as exc:
                 # HTTPValidationError and SDKError are mistral-specific exceptions not
                 # wrapped by pydantic_ai into ModelHTTPError.
                 error_code = resolve_llm_error_code(exc.status_code)
                 if error_code is None:
+                    await self._on_arena_unexpected_error()
                     raise
                 log = (
                     logger.warning if exc.status_code in EXPECTED_LLM_STATUS_CODES else logger.error
@@ -579,8 +666,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                     self.conversation.pk,
                     exc,
                 )
-                if messages:
-                    await self._persist_user_message_on_error(messages[-1])
+                await self._on_llm_error(messages, error_code)
                 error_event = events_v4.ErrorPart(error=error_code)
                 for translated in translator.translate(error_event):
                     yield self.event_encoder.encode(translated)
@@ -590,8 +676,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                     self.conversation.pk,
                     exc,
                 )
-                if messages:
-                    await self._persist_user_message_on_error(messages[-1])
+                await self._on_llm_error(messages, "model_connection_error")
                 error_event = events_v4.ErrorPart(error="model_connection_error")
                 for translated in translator.translate(error_event):
                     yield self.event_encoder.encode(translated)
@@ -601,11 +686,25 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                     self.conversation.pk,
                     exc,
                 )
-                if messages:
-                    await self._persist_user_message_on_error(messages[-1])
+                await self._on_llm_error(messages, "summarization_failed")
                 error_event = events_v4.ErrorPart(error="summarization_failed")
                 for translated in translator.translate(error_event):
                     yield self.event_encoder.encode(translated)
+            except StreamCancelException:
+                # User pressed stop. An arena candidate must still close its side so
+                # the vote endpoint can resolve the comparison instead of waiting.
+                if self._arena_comparison is not None:
+                    await sync_to_async(self._arena_record)(error="cancelled")
+                raise
+            except Exception:
+                await self._on_arena_unexpected_error()
+                raise
+
+            if self._arena_comparison is not None:
+                # A run that ended without recording an answer (busy reindex, failed
+                # document parsing, ...) must still close its side so the comparison
+                # can be resolved. A no-op when the answer was already recorded.
+                await sync_to_async(self._arena_record)(error="no_answer")
 
             for translated in translator.flush():
                 yield self.event_encoder.encode(translated)
@@ -654,7 +753,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
     # Core agent runner
     # --------------------------------------------------------------------- #
 
-    async def _prepare_agent_run(
+    async def _prepare_agent_run(  # noqa: PLR0912  # pylint: disable=too-many-branches
         self, messages: List[UIMessage]
     ) -> Tuple[str, List, List, Dict[str, str], Dict[str, Union[int, float]], List, bool]:
         """
@@ -680,7 +779,10 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             - conversation_has_own_documents: Whether this
             conversation has its own (non-project) text attachments
         """
-        history = ModelMessagesTypeAdapter.validate_python(self.conversation.pydantic_messages)
+        history_data = self.conversation.pydantic_messages
+        if self._arena_comparison is not None:
+            history_data = anonymize_arena_documentation(history_data)
+        history = ModelMessagesTypeAdapter.validate_python(history_data)
         history = update_history_local_urls(
             self.conversation, history
         )  # presign URLs for local images
@@ -1445,8 +1547,14 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         self._web_search_tool_registered = True
 
     def _setup_presentation_tool(self) -> None:
-        """Register the slide deck generation tool when the feature is enabled."""
+        """Register the slide deck generation tool when the feature is enabled.
+
+        Never registered in arena mode: a losing candidate must not leave a generated
+        file behind (see ``arena.SIDE_EFFECT_TOOL_NAMES``).
+        """
         if self._presentation_tool_registered or not self._is_presentation_generation_enabled:
+            return
+        if self._arena_comparison is not None:
             return
 
         @self.conversation_agent.tool(
@@ -1480,6 +1588,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             """Return a single payload with static and runtime assistant metadata."""
             return ToolReturn(
                 return_value=await build_self_documentation_payload(
+                    arena_mode=self._arena_comparison is not None,
                     model_hrid=self.model_hrid,
                     model_configuration=self.conversation_agent.configuration,
                     tools_configuration={
@@ -1697,6 +1806,26 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             self.conversation.title = title
         return title
 
+    async def _generate_arena_title(self) -> None:
+        """Title the conversation from the champion's turn, as a normal turn would.
+
+        The candidate works on an in-memory snapshot without this turn: add the
+        committed bubbles to it, then write only the title, unless the user set one.
+        """
+        payload = self._arena_comparison.champion_payload
+        if not payload:
+            return
+        messages = list(self.conversation.messages)
+        if payload.get("request_ui_message") and not (messages and messages[-1].role == "user"):
+            messages.append(UIMessage.model_validate(payload["request_ui_message"]))
+        messages.append(UIMessage.model_validate(payload["output_ui_message"]))
+        self.conversation.messages = messages
+        title = await self._generate_title_if_needed()
+        if title:
+            await models.ChatConversation.objects.filter(
+                pk=self.conversation.pk, title_set_by_user_at__isnull=True
+            ).aupdate(title=title)
+
     def _update_langfuse_trace(self, run_output) -> None:
         """Update the Langfuse trace with the final output, if analytics are enabled."""
         if not self._langfuse_available or self._langfuse_span is None:
@@ -1753,9 +1882,18 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             image_actions=image_actions,
         )
 
-        generated_title = await self._generate_title_if_needed()
-
-        await sync_to_async(self.conversation.save)()
+        if self._arena_comparison is None:
+            generated_title = await self._generate_title_if_needed()
+            if not await sync_to_async(self._save_completed_conversation)():
+                generated_title = None
+        else:
+            # Arena commits are handled by the guarded comparison transaction.
+            # A blind candidate never streams a title (it would tell the sides
+            # apart); the champion, whose answer is committed first, names the
+            # conversation when this turn is the auto-title one.
+            generated_title = None
+            if self._arena_role == ArenaRole.CHAMPION:
+                await self._generate_arena_title()
 
         cooldown_seconds = await sync_to_async(record_and_compute_cooldown)(
             self.user.pk, self.conversation_agent.configuration, request_tokens
@@ -1789,7 +1927,7 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             ),
         )
 
-    async def _run_agent(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements  # noqa: PLR0912
+    async def _run_agent(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements  # noqa: PLR0912, PLR0915
         self,
         messages: List[UIMessage],
         force_web_search: bool = False,
@@ -1859,11 +1997,16 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
         # The budget check runs on `history` (stored previous turns) only; the incoming
         # user message is not counted, by design — a turn tipped over by it alone is caught
         # next turn, and the security buffer absorbs the overflow meanwhile (see ADR 0002).
-        async for item in self._run_history_summary_phase(history):
-            if isinstance(item, PreparedHistory):
-                history = item.history
-            else:
-                yield item
+        # Arena runs retain the draw's summary and history for both candidates.
+        # A candidate must not launch a summarization that changes its peer's input.
+        if self._arena_comparison is None:
+            async for item in self._run_history_summary_phase(history):
+                if isinstance(item, PreparedHistory):
+                    history = item.history
+                else:
+                    yield item
+        else:
+            history = self._build_model_history(history)
 
         await self._agent_stop_streaming(force_cache_check=True)
         self._setup_self_documentation_tool()
@@ -1943,6 +2086,19 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                     new_content.append(content)
                 part.content = new_content
 
+    def _save_completed_conversation(self) -> bool:
+        """A normal turn must not overwrite a newer Arena turn or roll back its version."""
+        with transaction.atomic():
+            current = (
+                models.ChatConversation.objects.select_for_update()
+                .filter(pk=self.conversation.pk)
+                .first()
+            )
+            if current is None or current.arena_version != self.conversation.arena_version:
+                return False
+            self.conversation.save()
+            return True
+
     def _prepare_update_conversation(
         self,
         *,
@@ -1999,6 +2155,26 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
                 "co2_impact": co2_impact,
             }
 
+        final_output_json = json.loads(
+            ModelMessagesTypeAdapter.dump_json(final_output).decode("utf-8")
+        )
+        logger.debug("final_output_json: %s", final_output_json)
+
+        if self._arena_comparison is not None:
+            # Arena candidate: hold the turn on the comparison instead of the
+            # conversation. ``usage`` is still the per-turn figure here; the vote
+            # endpoint accumulates it when it commits the winner.
+            self._arena_record(
+                payload=arena_service.build_turn_payload(
+                    request_ui_message=model_message_to_ui_message(_merged_final_output_request),
+                    output_ui_message=_output_ui_message,
+                    pydantic_messages=final_output_json,
+                    usage=usage,
+                ),
+                usage=usage,
+            )
+            return
+
         usage["co2_impact"] += self.conversation.agent_usage.get("co2_impact", 0)
         usage["promptTokens"] += self.conversation.agent_usage.get("promptTokens", 0)
         usage["completionTokens"] += self.conversation.agent_usage.get("completionTokens", 0)
@@ -2012,11 +2188,6 @@ class AIAgentService:  # pylint: disable=too-many-instance-attributes
             if _request_ui_message:
                 self.conversation.messages += [_request_ui_message]
         self.conversation.messages += [_output_ui_message]
-
-        final_output_json = json.loads(
-            ModelMessagesTypeAdapter.dump_json(final_output).decode("utf-8")
-        )
-        logger.debug("final_output_json: %s", final_output_json)
         self.conversation.pydantic_messages += final_output_json
 
     async def _generate_title(self) -> str | None:
