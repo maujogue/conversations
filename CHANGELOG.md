@@ -13,6 +13,7 @@ and this project adheres to
 - ✨(back) add the data.gouv connector for a beta cohort
 - ✨(back) add Staan web search tool
 - ✨(front) let users activate or force the DataGouv connector
+- ✨(router) route each turn to a model tier by its complexity
 
 ### Changed
 
